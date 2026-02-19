@@ -1,0 +1,7 @@
+node_modules/
+network/organizations/
+network/channel-artifacts/
+config/
+*.tar.gz
+
+
