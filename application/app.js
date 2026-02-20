@@ -6,7 +6,12 @@ const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
+
 app.use(express.json());
+
+app.get('/ping', (req, res) => {
+    res.send("PONG - Backend ist erreichbar!");
+});
 
 // --- KONFIGURATION (Pfade zu deinem Netzwerk) ---
 const mspPath = path.resolve(__dirname, '..', 'network', 'organizations', 'peerOrganizations', 'org1.example.com');
@@ -81,3 +86,54 @@ app.listen(3000, () => {
     console.log('🚀 Backend läuft auf http://localhost:3000');
     console.log('Bereit für Daten von Bubble oder Postman!');
 });
+
+//Erzeugen einer SQLite-Datenbank um die (aktuell) Blink-Nachrichten des ESP8266 zu speichern
+const sqlite3 = require('sqlite3').verbose();
+
+// Datenbank initialisieren (erstellt eine Datei namens sensor_data.db)
+const dbPath = path.resolve(__dirname, 'sensor_data.db');
+const db = new sqlite3.Database(dbPath);
+
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
+        id TEXT, 
+        temp REAL, 
+        humidity REAL, 
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+});
+
+// DIE ROUTE: Mit einer auffälligen Konsolen-Ausgabe
+app.post('/api/buffer', (req, res) => {
+    console.log("------------------------------------");
+    console.log("!!! DATEN-EMPFANG VERSUCH !!!");
+    console.log("Inhalt:", req.body);
+    
+    const { id, temp, humidity } = req.body;
+    const query = `INSERT INTO sensor_logs (id, temp, humidity) VALUES (?, ?, ?)`;
+    
+    db.run(query, [id, temp, humidity], function(err) {
+        if (err) {
+            console.error("SQL Fehler:", err.message);
+            return res.status(500).send("Fehler");
+        }
+        console.log(`ERFOLG: In SQL gespeichert (ID: ${this.lastID})`);
+        res.status(200).json({ status: "OK" });
+    });
+});
+
+const PORT = 3000;
+// Die '0.0.0.0' ist zwingend erforderlich!
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`--- BACKEND LIVE ---`);
+    console.log(`Lausche auf Port ${PORT} auf allen Schnittstellen.`);
+});
+
+// --- ROUTE FÜR BUBBLE (VORSCHAU DER SQL DATEN) ---
+app.get('/api/buffer/view', (req, res) => {
+    db.all("SELECT * FROM sensor_logs ORDER BY timestamp DESC LIMIT 20", [], (err, rows) => {
+        if (err) return res.status(500).send(err.message);
+        res.status(200).json(rows);
+    });
+});
+
