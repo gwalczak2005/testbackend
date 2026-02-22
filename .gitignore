@@ -5,3 +5,4 @@ config/
 *.tar.gz
 
 
+testbackend/application/sensor_data.db
