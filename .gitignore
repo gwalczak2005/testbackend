@@ -7,3 +7,9 @@ config/
 
 testbackend/application/sensor_data.db
 testbackend/application/wallet/*/msp/keystore/
+
+# Ignoriere die generierten Zertifikate des Netzwerks (dafür gibt es Skripte)
+infrastructure/organizations/
+infrastructure/channel-artifacts/
+# Ignoriere Docker-Volumes falls vorhanden
+infrastructure/system-genesis-block/
