@@ -6,3 +6,4 @@ config/
 
 
 testbackend/application/sensor_data.db
+testbackend/application/wallet/*/msp/keystore/
