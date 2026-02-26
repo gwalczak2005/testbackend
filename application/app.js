@@ -8,6 +8,7 @@ const sqlite3 = require('sqlite3').verbose();
 
 let gateway;
 let contract;
+let client; //gRPC Client global halten, um bei Bedarf zu schließen
 
 const app = express();
 app.use(express.json());
@@ -36,8 +37,12 @@ const db = new sqlite3.Database(dbPath, (err) => {
 // --- HYPERLEDGER FUNKTIONEN ---
 async function initBlockchain() {
     try {
+        // Falls bereits eine alte Verbindung besteht, sauber schließen
+        if (gateway) gateway.close();
+        if (client) client.close();
+
         const tlsRootCert = fs.readFileSync(tlsCertPath);
-        const client = new grpc.Client('localhost:7051', grpc.credentials.createSsl(tlsRootCert), {
+        client = new grpc.Client('localhost:7051', grpc.credentials.createSsl(tlsRootCert), {
             'grpc.keepalive_time_ms': 120000,
             'grpc.http2.min_time_between_pings_ms': 120000,
         });
@@ -46,7 +51,6 @@ async function initBlockchain() {
         const keyFile = files.find(file => file.endsWith('_sk'));
         const privateKeyPem = fs.readFileSync(path.join(keyDirectoryPath, keyFile));
 
-        // Wir weisen die Werte den globalen Variablen zu
         gateway = await connect({
             client,
             identity: { mspId: 'Org1MSP', credentials: fs.readFileSync(certPath) },
@@ -54,41 +58,37 @@ async function initBlockchain() {
         });
 
         const network = gateway.getNetwork('mychannel');
-        contract = network.getContract('basic'); // Hier wird 'contract' befüllt!
+        contract = network.getContract('basic');
         
-        console.log("✅ Blockchain-Gateway erfolgreich initialisiert.");
+        console.log("✅ Blockchain-Gateway initialisiert.");
     } catch (error) {
-        console.error("❌ Fehler bei Blockchain-Initialisierung:", error.message);
+        console.error("❌ Kritischer Fehler bei Blockchain-Init:", error.message);
+        contract = null; // Signalisiert anderen Funktionen, dass wir offline sind
     }
 }
 
 // Hilfsfunktion zum Senden an die Blockchain
 async function sendToHyperledger(id, temp, humidity) {
+    const timestampID = `${id}_${Date.now()}`;
+    console.log(`\n🔗 BLOCKCHAIN: Sende ${timestampID}...`);
+
+    // Automatischer Reconnect-Versuch, falls contract null oder undefiniert ist
+    if (!contract) {
+        console.log("🔄 Verbindung verloren. Versuche Reconnect...");
+        await initBlockchain();
+    }
+
     try {
-        // Falls der Server startete, bevor die Blockchain bereit war
-        if (!contract) {
-            console.log("🔄 Contract nicht bereit, initialisiere neu...");
-            await initBlockchain();
-        }
-
-        const timestampID = `${id}_${Date.now()}`;
-        console.log(`\n🔗 BLOCKCHAIN: Sende Messpunkt ${timestampID}...`);
-
-        // Nutzt die globale Variable 'contract'
         await contract.submitTransaction(
-            'CreateAsset', 
-            timestampID, 
-            'Sensor_Node', 
-            temp.toString(), 
-            humidity.toString(), 
-            'Lab_User'
+            'CreateAsset', timestampID, 'Sensor_Node', 
+            temp.toString(), humidity.toString(), 'Lab_User'
         );
-        
-        console.log("✅ Blockchain-Eintrag erfolgreich.");
+        console.log("✅ Eintrag erfolgreich.");
     } catch (error) {
-        console.error("❌ Blockchain-Fehler:", error.message);
-        if (error.message.includes('10 ABORTED')) {
-             console.log("Tipp: Das könnte ein Verbindungsabbruch sein. Starte ggf. das Backend neu.");
+        console.error("❌ Sende-Fehler:", error.message);
+        // Falls die Verbindung während des Sendens abgebrochen ist:
+        if (error.message.includes('14 UNAVAILABLE') || error.message.includes('closed')) {
+            contract = null; // Erzwingt Reconnect beim nächsten Versuch
         }
     }
 }
