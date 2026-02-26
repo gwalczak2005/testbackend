@@ -132,6 +132,41 @@ app.get('/api/buffer/view', (req, res) => {
         res.status(200).json(rows);
     });
 });
+// NEU: Alle Blockchain-Einträge abrufen
+app.get('/api/blockchain/all', async (req, res) => {
+    try {
+        if (!contract) await initBlockchain();
+        
+        console.log("📡 Rufe vollständige Blockchain-Historie ab...");
+        const resultBytes = await contract.evaluateTransaction('GetAllAssets');
+        const resultJson = JSON.parse(Buffer.from(resultBytes).toString());
+        
+        // Schön sortiert nach Zeitstempel (neueste zuerst)
+        const sortedResults = resultJson.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+        
+        res.status(200).json(sortedResults);
+    } catch (error) {
+        res.status(500).json({ status: "Error", message: error.message });
+    }
+});
+
+// NEU: Nur kritische Warnungen abrufen
+app.get('/api/blockchain/warnings', async (req, res) => {
+    try {
+        if (!contract) await initBlockchain();
+        
+        const resultBytes = await contract.evaluateTransaction('GetAllAssets');
+        const allAssets = JSON.parse(Buffer.from(resultBytes).toString());
+        
+        // Filtert nur die Einträge mit Warnung
+        const warnings = allAssets.filter(asset => asset.IsWarning === true);
+        
+        console.log(`⚠️  ${warnings.length} Warnungen in der Blockchain gefunden!`);
+        res.status(200).json(warnings);
+    } catch (error) {
+        res.status(500).json({ status: "Error", message: error.message });
+    }
+});
 
 // --- SERVER START ---
 app.listen(port, '0.0.0.0', () => {
