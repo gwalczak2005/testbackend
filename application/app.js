@@ -69,26 +69,38 @@ async function initBlockchain() {
 
 // Hilfsfunktion zum Senden an die Blockchain
 async function sendToHyperledger(id, temp, humidity) {
+    // Eindeutige ID mit Zeitstempel für die Blockchain
     const timestampID = `${id}_${Date.now()}`;
-    console.log(`\n🔗 BLOCKCHAIN: Sende ${timestampID}...`);
+    
+    console.log(`\n🔗 BLOCKCHAIN: Sende Messpunkt ${timestampID}...`);
 
-    // Automatischer Reconnect-Versuch, falls contract null oder undefiniert ist
     if (!contract) {
         console.log("🔄 Verbindung verloren. Versuche Reconnect...");
         await initBlockchain();
     }
 
     try {
+        // HIER SIND DIE NEUEN PARAMETER:
+        // 1. timestampID (eindeutig)
+        // 2. id (Name des Sensors vom ESP)
+        // 3. temp (als String)
+        // 4. humidity (als String)
+        // 5. 'Supplier_Acer_Project' (Ein statischer Name für den Lieferanten)
+        
         await contract.submitTransaction(
-            'CreateAsset', timestampID, 'Sensor_Node', 
-            temp.toString(), humidity.toString(), 'Lab_User'
+            'CreateAsset', 
+            timestampID, 
+            id, 
+            temp.toString(), 
+            humidity.toString(), 
+            'Supplier_Acer_Project'
         );
-        console.log("✅ Eintrag erfolgreich.");
+        
+        console.log(`✅ Blockchain-Eintrag erfolgreich! (Warnungs-Check erfolgt im Ledger)`);
     } catch (error) {
-        console.error("❌ Sende-Fehler:", error.message);
-        // Falls die Verbindung während des Sendens abgebrochen ist:
+        console.error("❌ Blockchain-Sende-Fehler:", error.message);
         if (error.message.includes('14 UNAVAILABLE') || error.message.includes('closed')) {
-            contract = null; // Erzwingt Reconnect beim nächsten Versuch
+            contract = null;
         }
     }
 }
