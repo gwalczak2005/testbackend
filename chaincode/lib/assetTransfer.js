@@ -5,80 +5,65 @@ const stringify = require('json-stringify-deterministic');
 const { Contract } = require('fabric-contract-api');
 
 class AssetTransfer extends Contract {
+    
+    async AssetExists(ctx, id) {
+    const assetJSON = await ctx.stub.getState(id);
+    return assetJSON && assetJSON.length > 0;
+}
 
     async InitLedger(ctx) {
         console.info('============= Ledger Initialisiert ===========');
     }
 
-    async CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName) {
-        const exists = await this.AssetExists(ctx, id);
+    async CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId) {
+        // 1. Den Composite Key erstellen
+        // Wir nutzen "asset" als Objekttyp, um eine Namensraum-Trennung zu haben
+        const compositeKey = ctx.stub.createCompositeKey('asset', [supplierName, deliveryId, id]);
+
+        // Prüfen, ob dieser spezifische Key schon existiert
+        const exists = await this.AssetExists(ctx, compositeKey);
         if (exists) {
-            throw new Error(`Der Messpunkt ${id} existiert bereits.`);
+            throw new Error(`Der Messpunkt ${id} existiert bereits für diese Lieferung.`);
         }
 
+        // ... (Logik für Limits & Warnings bleibt gleich) ...
         const tempNumber = parseFloat(temperature);
-        const humNumber = parseFloat(humidity);
+        const isWarning = tempNumber > 30; // Später dynamisch!
 
-        if (isNaN(tempNumber) || isNaN(humNumber)) {
-            throw new Error('Temperatur oder Feuchtigkeit sind keine gültigen Zahlen.');
-        }
-
-        // 30-Grad-Wächter
-        const isWarning = tempNumber > 30;
-
-        // Zeitstempel sicher aus der Blockchain extrahieren
-        const txTimestamp = ctx.stub.getTxTimestamp();
-        const timestampDate = new Date(txTimestamp.seconds.low * 1000).toISOString();
-
-        // Ein absolut "sauberes" Objekt erstellen
         const asset = {
-            ID: String(id),
-            SensorID: String(sensorId),
+            ID: id,
+            SensorID: sensorId,
             Temperature: tempNumber,
-            Humidity: humNumber,
-            Supplier: String(supplierName),
-            IsWarning: Boolean(isWarning),
-            Timestamp: String(timestampDate),
-            DocType: 'sensor_log'
+            Humidity: parseFloat(humidity),
+            Supplier: supplierName,
+            DeliveryID: deliveryId,
+            IsWarning: isWarning,
+            Timestamp: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString(),
         };
 
-        // Wir verzichten auf sort-keys-recursive, um den TypeError zu vermeiden
-        await ctx.stub.putState(id, Buffer.from(stringify(asset)));
-        
-        console.info(`✅ Asset ${id} erfolgreich gespeichert. Warnung: ${isWarning}`);
-        return JSON.stringify(asset);
+        // Wir speichern das Asset unter dem Composite Key
+        await ctx.stub.putState(compositeKey, Buffer.from(stringify(asset)));
+        return JSON.stringify({ ...asset, CompositeKey: compositeKey });
     }
 
-    async ReadAsset(ctx, id) {
-        const assetJSON = await ctx.stub.getState(id);
-        if (!assetJSON || assetJSON.length === 0) {
-            throw new Error(`Messpunkt ${id} nicht gefunden.`);
-        }
-        return assetJSON.toString();
+    // NEU: Schnellsuche für einen Lieferanten
+    async GetAssetsBySupplier(ctx, supplierName) {
+        const iterator = await ctx.stub.getStateByPartialCompositeKey('asset', [supplierName]);
+        return await this._getAllResults(iterator);
     }
 
-    async AssetExists(ctx, id) {
-        const assetJSON = await ctx.stub.getState(id);
-        return assetJSON && assetJSON.length > 0;
-    }
-
-    async GetAllAssets(ctx) {
+    // Interne Hilfsfunktion für die Iteratoren
+    async _getAllResults(iterator) {
         const allResults = [];
-        const iterator = await ctx.stub.getStateByRange('', '');
-        let result = await iterator.next();
-        while (!result.done) {
-            const strValue = Buffer.from(result.value.value.toString()).toString('utf8');
-            let record;
-            try {
-                record = JSON.parse(strValue);
-            } catch (err) {
-                record = strValue;
+        let res = await iterator.next();
+        while (!res.done) {
+            if (res.value && res.value.value.toString()) {
+                allResults.push(JSON.parse(res.value.value.toString('utf8')));
             }
-            allResults.push(record);
-            result = await iterator.next();
+            res = await iterator.next();
         }
+        await iterator.close();
         return JSON.stringify(allResults);
     }
 }
-
 module.exports = AssetTransfer;

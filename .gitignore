@@ -30,6 +30,9 @@ network/organizations/fabric-ca/
 network/organizations/ordererOrganizations/
 network/organizations/peerOrganizations/
 network/system-genesis-block/
+infrastructure/organizations/
+infrastructure/channel-artifacts/
+infrastructure/system-genesis-block/
 
 # ==================================================
 # APPLICATION SPECIFIC
