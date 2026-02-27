@@ -1,15 +1,38 @@
+# ==================================================
+# MAIN PROJECT RULES
+# ==================================================
 node_modules/
-network/organizations/
-network/channel-artifacts/
-config/
+*.log
 *.tar.gz
+.DS_Store
+.env
 
+# ==================================================
+# CHAINCODE RULES (from ./chaincode/.gitignore)
+# ==================================================
+chaincode/coverage/
+chaincode/.nyc_output/
+chaincode/node_modules/
+chaincode/jspm_packages/
+chaincode/package-lock.json
 
-testbackend/application/sensor_data.db
-testbackend/application/wallet/*/msp/keystore/
+# ==================================================
+# NETWORK & INFRASTRUCTURE (from ./network/.gitignore)
+# ==================================================
+network/channel-artifacts/*.tx
+network/channel-artifacts/*.block
+network/channel-artifacts/*.json
+network/channel-artifacts/*.pb
+network/ledgers/
+network/ledgers-backup/
+network/org3-artifacts/crypto-config/
+network/organizations/fabric-ca/
+network/organizations/ordererOrganizations/
+network/organizations/peerOrganizations/
+network/system-genesis-block/
 
-# Ignoriere die generierten Zertifikate des Netzwerks (dafür gibt es Skripte)
-infrastructure/organizations/
-infrastructure/channel-artifacts/
-# Ignoriere Docker-Volumes falls vorhanden
-infrastructure/system-genesis-block/
+# ==================================================
+# APPLICATION SPECIFIC
+# ==================================================
+application/sensor_data.db
+application/wallet/
