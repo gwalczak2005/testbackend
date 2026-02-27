@@ -127,23 +127,6 @@ async function sendToHyperledger(id, temp, humidity) {
 
 app.get('/ping', (req, res) => res.send("PONG - Backend ist erreichbar!"));
 
-app.post('/api/buffer', (req, res) => {
-    const { id, temp, humidity } = req.body;
-    
-    db.run(`INSERT INTO sensor_logs (id, temp, humidity) VALUES (?, ?, ?)`, [id, temp, humidity], function(err) {
-        if (err) return res.status(500).json({ status: "Error", message: err.message });
-        
-        messageCounter++;
-        console.log(`[SQL] Gespeichert (${messageCounter}/2)`);
-
-        if (messageCounter % 2 === 0) {
-            sendToHyperledger(id, temp, humidity);
-            messageCounter = 0;
-        }
-        res.status(200).json({ status: "OK" });
-    });
-});
-
 app.get('/api/buffer/view', (req, res) => {
     db.all("SELECT * FROM sensor_logs ORDER BY timestamp DESC LIMIT 20", [], (err, rows) => {
         if (err) return res.status(500).send(err.message);
@@ -219,6 +202,45 @@ app.get('/api/blockchain/supplier/:name', async (req, res) => {
 
     } catch (error) {
         console.error("❌ Fehler bei der Blockchain-Abfrage:", error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+app.post('/api/buffer', (req, res) => {
+    const { id, temp, humidity } = req.body;
+    
+    db.run(`INSERT INTO sensor_logs (id, temp, humidity) VALUES (?, ?, ?)`, [id, temp, humidity], function(err) {
+        if (err) return res.status(500).json({ status: "Error", message: err.message });
+        
+        messageCounter++;
+        console.log(`[SQL] Gespeichert (${messageCounter}/2)`);
+
+        if (messageCounter % 2 === 0) {
+            sendToHyperledger(id, temp, humidity);
+            messageCounter = 0;
+        }
+        res.status(200).json({ status: "OK" });
+    });
+});
+
+app.post('/api/admin/set-limit', async (req, res) => {
+    // Wir erwarten jetzt 6 Werte vom Frontend
+    const { supplier, delivery, maxTemp, minTemp, maxHum, minHum } = req.body;
+
+    try {
+        if (!contract) await initBlockchain();
+        
+        await contract.submitTransaction(
+            'SetLimit', 
+            supplier, 
+            delivery, 
+            maxTemp.toString(), 
+            minTemp.toString(), 
+            maxHum.toString(), 
+            minHum.toString()
+        );
+        
+        res.json({ message: "Grenzwerte für Temperatur und Feuchtigkeit erfolgreich gespeichert." });
+    } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
