@@ -35,6 +35,22 @@ const db = new sqlite3.Database(dbPath, (err) => {
     }
 });
 
+// --- DATENBANK ERWEITERUNG --- (für Onboarding-Prozess)
+db.serialize(() => {
+    // Deine bestehende Log-Tabelle
+    db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
+        id TEXT, temp REAL, humidity REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    // NEU: Mapping-Tabelle für Onboarding
+    db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
+        sensor_id TEXT PRIMARY KEY,
+        supplier_name TEXT,
+        delivery_id TEXT,
+        is_active INTEGER DEFAULT 1
+    )`);
+});
+
 // --- HYPERLEDGER FUNKTIONEN ---
 async function initBlockchain() {
     try {
@@ -70,60 +86,66 @@ async function initBlockchain() {
 
 // Hilfsfunktion zum Senden an die Blockchain
 async function sendToHyperledger(id, temp, humidity) {
-    // 1. MAPPING-LOGIK (Weg A)
-    // Hier bestimmen wir, welcher Sensor gerade für wen fährt.
-    // Später holen wir diese Info aus deiner SQLite-Datenbank.
-    let supplierName = 'Supplier_Unbekannt';
-    let deliveryId = 'NO-ACTIVE-DELIVERY';
-
-    if (id === 'ESP_LOCAL') { // Dein Test-Sensor Name
-        supplierName = 'Lieferant1';
-        deliveryId = 'SHIP-2026-001';
-    } else if (id === 'ESP_KUEHLTRUHE_2') {
-        supplierName = 'Lieferant2';
-        deliveryId = 'SHIP-2026-002';
-    }
-
-    // 2. Eindeutige ID für den Ledger-Key
-    const timestampID = `${id}_${Date.now()}`;
-    
-    console.log(`\n🔗 BLOCKCHAIN: Sende Daten für ${supplierName} (${deliveryId})...`);
-
-    if (!contract) {
-        console.log("🔄 Verbindung verloren. Warte 5 Sekunden vor Reconnect...");
-        await sleep(5000); // 5000 Millisekunden = 5 Sekunden echte Pause
-        await initBlockchain();
-        
-        // Falls es immer noch nicht geht, brechen wir hier ab, statt zu spammen
-        if (!contract) {
-            console.error("❌ Reconnect fehlgeschlagen. Überspringe diesen Messpunkt.");
-            return;
-        }
-    }
+    // 1. DYNAMISCHES MAPPING AUS DER DB HOLEN (Dein Promise-Block)
+    const getMapping = () => {
+        return new Promise((resolve, reject) => {
+            db.get("SELECT supplier_name, delivery_id FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1", [id], (err, row) => {
+                if (err) reject(err);
+                resolve(row);
+            });
+        });
+    };
 
     try {
-        // 3. TRANSAKTION SENDEN
-        // WICHTIG: Die Reihenfolge muss exakt wie im Smart Contract sein!
+        const mapping = await getMapping();
+
+        // --- DER GATEKEEPER-CHECK ---
+        if (!mapping) {
+            console.error(`\n⚠️  BLOCKCHAIN-STOPP: Sensor [${id}] ist NICHT AKTIV für eine Lieferung registriert!`);
+            console.error(`👉 Grund: Entweder nie onboarded oder bereits ge-offboarded.`);
+            return; // Hier stoppt die Funktion komplett. Nichts geht an die Blockchain.
+        }
+
+        // Wenn wir hier ankommen, haben wir ein gültiges mapping!
+        const { supplier_name, delivery_id } = mapping;
+        const timestampID = `${id}_${Date.now()}`;
+        
+        console.log(`\n🔗 BLOCKCHAIN: Sende validierte Daten für ${supplier_name} (${delivery_id})...`);
+
+        // 2. BLOCKCHAIN GATEWAY CHECK
+        if (!contract) {
+            console.log("🔄 Verbindung zum Gateway wird neu aufgebaut...");
+            await initBlockchain();
+            if (!contract) {
+                console.error("❌ Blockchain-Verbindung fehlgeschlagen. Daten werden verworfen.");
+                return;
+            }
+        }
+
+        // 3. TRANSAKTION AN DIE BLOCKCHAIN ÜBERMITTELN
         await contract.submitTransaction(
             'CreateAsset', 
-            timestampID,    // assetID (für den Composite Key)
-            id,             // sensorId
+            timestampID, 
+            id, 
             temp.toString(), 
             humidity.toString(), 
-            supplierName, 
-            deliveryId
+            supplier_name, 
+            delivery_id
         );
         
-        console.log(`✅ Blockchain-Eintrag erfolgreich unter Lieferung ${deliveryId} gespeichert.`);
+        console.log(`✅ Blockchain-Eintrag für ${delivery_id} erfolgreich gespeichert.`);
+
     } catch (error) {
-        console.error("❌ Blockchain-Sende-Fehler:", error.message);
-        if (error.message.includes('14 UNAVAILABLE') || error.message.includes('closed')) {
+        console.error("❌ Blockchain-Fehler in sendToHyperledger:", error.message);
+        // Bei Verbindungsabbrüchen (gRPC 14) setzen wir den contract zurück
+        if (error.message.includes('14') || error.message.includes('closed')) {
             contract = null;
         }
     }
 }
 
 // --- API ROUTES ---
+    //GETTER
 
 app.get('/ping', (req, res) => res.send("PONG - Backend ist erreichbar!"));
 
@@ -205,15 +227,18 @@ app.get('/api/blockchain/supplier/:name', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+    //SETTER
 app.post('/api/buffer', (req, res) => {
     const { id, temp, humidity } = req.body;
     
+    // DEBUG-ZEILE: Zeigt uns genau, was der Sensor schickt
+    console.log(`📩 EINGANG: Daten von Sensor [${id}] empfangen.`);
+
     db.run(`INSERT INTO sensor_logs (id, temp, humidity) VALUES (?, ?, ?)`, [id, temp, humidity], function(err) {
         if (err) return res.status(500).json({ status: "Error", message: err.message });
         
         messageCounter++;
-        console.log(`[SQL] Gespeichert (${messageCounter}/2)`);
-
         if (messageCounter % 2 === 0) {
             sendToHyperledger(id, temp, humidity);
             messageCounter = 0;
@@ -243,6 +268,90 @@ app.post('/api/admin/set-limit', async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+});
+
+// --- SENSOR ONBOARDING / ZUORDNUNG ---
+app.post('/api/admin/onboard-sensor', (req, res) => {
+    const { sensorId, supplier, delivery } = req.body;
+
+    if (!sensorId || !supplier || !delivery) {
+        return res.status(400).json({ error: "Daten unvollständig." });
+    }
+
+    // 1. SCHRITT: Wir suchen nach JEDEM Eintrag für diesen Sensor oder diese Lieferung
+    // Wir unterscheiden nicht mehr nur nach "is_active = 1"
+    db.all(`SELECT * FROM hardware_mappings WHERE sensor_id = ? OR delivery_id = ?`, 
+    [sensorId, delivery], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+
+        // Wir gehen die gefundenen Zeilen durch und prüfen auf Konflikte
+        for (let row of rows) {
+            
+            // KONFLIKT A: Die Lieferung wurde bereits abgeschlossen (Archiv-Schutz)
+            if (row.delivery_id === delivery && row.is_active === 0) {
+                console.warn(`🚫 ZUGRIFF VERWEIGERT: Lieferung ${delivery} ist bereits abgeschlossen und archiviert.`);
+                return res.status(403).json({ 
+                    error: "Archiv-Schutz", 
+                    message: `Die Lieferung ${delivery} ist bereits abgeschlossen und kann nicht mehr verändert werden.` 
+                });
+            }
+
+            // KONFLIKT B: Die Lieferung läuft gerade mit einem anderen Sensor
+            if (row.delivery_id === delivery && row.is_active === 1) {
+                return res.status(409).json({ 
+                    error: "Konflikt", 
+                    message: `Die Lieferung ${delivery} läuft bereits mit Sensor ${row.sensor_id}.` 
+                });
+            }
+
+            // KONFLIKT C: Der Sensor ist gerade in einer anderen Fahrt aktiv
+            if (row.sensor_id === sensorId && row.is_active === 1) {
+                return res.status(409).json({ 
+                    error: "Konflikt", 
+                    message: `Der Sensor ${sensorId} befindet sich gerade in der aktiven Fahrt ${row.delivery_id}.` 
+                });
+            }
+        }
+
+        // 2. SCHRITT: Wenn kein Konflikt gefunden wurde, neu anlegen oder (inaktiven) Sensor-Eintrag überschreiben
+        const query = `INSERT OR REPLACE INTO hardware_mappings (sensor_id, supplier_name, delivery_id, is_active) 
+                       VALUES (?, ?, ?, 1)`;
+
+        db.run(query, [sensorId, supplier, delivery], function(err) {
+            if (err) return res.status(500).json({ error: err.message });
+            console.log(`✅ ONBOARDING ERFOLGREICH: Sensor ${sensorId} für ${delivery} registriert.`);
+            res.json({ message: "Sensor erfolgreich zugewiesen." });
+        });
+    });
+});
+
+// PROOF-OF-DELIVERY => OFFBOARDING & BLOCKCHAIN-CONFIRM
+app.post('/api/admin/proof-of-delivery', async (req, res) => {
+    const { supplier, delivery, recipientName } = req.body;
+
+    try {
+        if (!contract) await initBlockchain();
+        
+        // A. Blockchain-Eintrag
+        await contract.submitTransaction('ConfirmDelivery', supplier, delivery, recipientName);
+
+        // B. Datenbank-Update (WICHTIG: Wir deaktivieren ALLES für diese Fahrt)
+        db.run(`UPDATE hardware_mappings SET is_active = 0 WHERE delivery_id = ?`, [delivery], function(err) {
+            if (err) return res.status(500).json({ error: err.message });
+            
+            console.log(`🏁 OFFBOARDING ERFOLGREICH: Fahrt ${delivery} beendet.`);
+            res.json({ status: "Success", message: `Lieferung ${delivery} abgeschlossen.` });
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// --- 3. DIE DEBUG-HILFE (Neu: Schau dir die Tabelle im Browser an) ---
+app.get('/api/admin/debug-mappings', (req, res) => {
+    db.all("SELECT * FROM hardware_mappings", [], (err, rows) => {
+        res.json(rows);
+    });
 });
 
 // --- SERVER START ---
