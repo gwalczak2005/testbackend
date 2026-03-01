@@ -7,6 +7,9 @@ APP_WALLET=$PROJECT_ROOT/application/wallet/org1-admin
 
 echo "SHUTDOWN & CLEANUP STARTEN..."
 
+#Zusatz: sensor_data.db entfernen
+echo "🧹 Lösche SQL sensor_data.db"
+
 # 1. Hyperledger Fabric Netzwerk stoppen
 if [ -d "$INFRA_PATH" ]; then
     echo "Fahre Fabric-Netzwerk herunter..."
