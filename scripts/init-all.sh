@@ -8,7 +8,8 @@ APP_WALLET=$PROJECT_ROOT/application/wallet/org1-admin
 echo "🧼 STARTE RADIKALEN REINIGUNGSPROZESS..."
 
 #Zusatz: sensor_data.db entfernen
-echo "🧹 Lösche SQL sensor_data.db"
+echo "🧹 Lösche sensor_data.db"
+rm -f ./application/sensor_data.db
 
 # 1. Infrastruktur stoppen
 cd $INFRA_PATH

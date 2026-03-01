@@ -228,11 +228,86 @@ app.get('/api/blockchain/supplier/:name', async (req, res) => {
     }
 });
 
+// Datenintegritätsverifikation zwischen Blockchain und SQL-Datenbank
+app.get('/api/admin/audit/:deliveryId', async (req, res) => {
+    const { deliveryId } = req.params;
+
+    try {
+        // 1. Mapping aus SQL holen
+        const mapping = await new Promise((resolve, reject) => {
+            db.get("SELECT supplier_name, sensor_id FROM hardware_mappings WHERE delivery_id = ?", [deliveryId], (err, row) => {
+                if (err) reject(err);
+                resolve(row);
+            });
+        });
+
+        if (!mapping) return res.status(404).json({ error: "Lieferung nicht gefunden." });
+
+        // 2. SQL Logs zählen
+        const sqlLogs = await new Promise((resolve, reject) => {
+            db.all("SELECT * FROM sensor_logs WHERE id = ?", [mapping.sensor_id], (err, rows) => {
+                if (err) reject(err);
+                resolve(rows);
+            });
+        });
+
+        // 3. Blockchain-Daten abrufen
+        if (!contract) await initBlockchain();
+        
+        const bcResultBuffer = await contract.evaluateTransaction('GetAssetsByDelivery', mapping.supplier_name, deliveryId);
+        
+        // Deklaration außerhalb des try-Blocks, damit sie unten verfügbar ist
+        let bcData; 
+
+        try {
+            // Buffer in UTF-8 String umwandeln
+            const rawString = Buffer.from(bcResultBuffer).toString('utf8');
+            console.log("DEBUG - Blockchain Rohdaten:", rawString);
+
+            // Zuweisung (ohne erneutes 'let'!)
+            bcData = JSON.parse(rawString); 
+            
+        } catch (parseErr) {
+            console.error("❌ Blockchain JSON Fehler:", parseErr.message);
+            // Fallback auf leeres Array, falls Blockchain noch leer oder Format falsch
+            bcData = []; 
+        }   
+
+        // 4. Der Abgleich (zwischen Blockchain und SQL)
+        const sqliteCount = sqlLogs.length;
+        const blockchainCount = bcData.length;
+        
+        // Logik: Nur jeder zweite Eintrag wird gespeichert
+        const expectedCount = Math.floor(sqliteCount / 2);
+        
+        // Toleranz von +/- 1 (wegen Counter-Start)
+        const isConsistent = Math.abs(blockchainCount - expectedCount) <= 1;
+
+        console.log(`📊 Audit für ${deliveryId}: SQL(${sqliteCount}) vs BC(${blockchainCount})`);
+
+        res.json({
+            delivery: deliveryId,
+            sensor: mapping.sensor_id,
+            integrity: isConsistent ? "VERIFIED ✅" : "DISCREPANCY ❌",
+            details: {
+                sqlCount: sqliteCount,
+                blockchainCount: blockchainCount,
+                expected: expectedCount,
+                syncStatus: sqliteCount > 0 ? ((blockchainCount / (sqliteCount/2)) * 100).toFixed(1) + "%" : "0%"
+            },
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error("Critical Audit Error:", error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
     //SETTER
 app.post('/api/buffer', (req, res) => {
     const { id, temp, humidity } = req.body;
     
-    // DEBUG-ZEILE: Zeigt uns genau, was der Sensor schickt
     console.log(`📩 EINGANG: Daten von Sensor [${id}] empfangen.`);
 
     db.run(`INSERT INTO sensor_logs (id, temp, humidity) VALUES (?, ?, ?)`, [id, temp, humidity], function(err) {

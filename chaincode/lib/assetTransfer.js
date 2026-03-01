@@ -88,23 +88,45 @@ class AssetTransfer extends Contract {
         return await this._getAllResults(iterator);
     }
 
+    // Sucht alle Messwerte für eine spezifische Lieferung eines Lieferanten
+    async GetAssetsByDelivery(ctx, supplierName, deliveryId) {
+    // Wir nutzen den Teil-Key, um alle IDs unter dieser Lieferung zu finden
+    const iterator = await ctx.stub.getStateByPartialCompositeKey('asset', [supplierName, deliveryId]);
+    return await this._getAllResults(iterator);
+    }
+    
     // Gibt ALLE Messpunkte zurück (über alle Lieferanten hinweg)
     async GetAllAssets(ctx) {
         const iterator = await ctx.stub.getStateByPartialCompositeKey('asset', []);
         return await this._getAllResults(iterator);
     }
 
-    // Interne Hilfsfunktion für die Iteratoren
+// Interne Hilfsfunktion für die Iteratoren
     async _getAllResults(iterator) {
         const allResults = [];
         let res = await iterator.next();
+
         while (!res.done) {
             if (res.value && res.value.value.toString()) {
-                allResults.push(JSON.parse(res.value.value.toString('utf8')));
+                const rawStr = res.value.value.toString('utf8');
+                
+                // WICHTIG: Ein try-catch innerhalb der Schleife!
+                // Falls ein Asset mal kein valides JSON ist, überspringen wir es einfach,
+                // statt die gesamte Transaktion abstürzen zu lassen.
+                try {
+                    const jsonRecord = JSON.parse(rawStr);
+                    allResults.push(jsonRecord);
+                } catch (err) {
+                    console.log(`⚠️ Fehler beim Parsen eines Datensatzes: ${rawStr}`, err);
+                    // Optional: Den rohen String pushen, falls es kein JSON ist
+                    // allResults.push(rawStr); 
+                }
             }
             res = await iterator.next();
         }
         await iterator.close();
+        
+        // Gibt ein garantiert valides JSON-Array als String zurück
         return JSON.stringify(allResults);
     }
 
