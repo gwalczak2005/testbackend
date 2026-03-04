@@ -23,6 +23,36 @@ const certPath = path.join(walletPath, 'msp', 'signcerts', 'cert.pem');
 const keyDirectoryPath = path.join(walletPath, 'msp', 'keystore');
 const tlsCertPath = path.join(walletPath, 'tls', 'ca.crt');
 
+//Schlüssel-Datenbank 
+const API_KEYS = {
+    "MASTER_ADMIN_2026": { role: "ADMIN", owner: "Großunternehmen" },
+    "KEY_SUPPLIER_A": { role: "SUPPLIER", owner: "Supplier_A" }
+};
+
+const supplierAuth = (req, res, next) => {
+    const apiKey = req.headers['x-api-key'];
+    const user = API_KEYS[apiKey];
+    const requestedSupplier = req.params.supplier;
+
+    // 1. Key-Check
+    if (!user) {
+        return res.status(401).json({ error: "Ungültiger Key." });
+    }
+
+    // 2. Berechtigungs-Check (Admin darf alles | Supplier nur sein eigenes)
+    if (user.role === "ADMIN" || (user.role === "SUPPLIER" && user.owner === requestedSupplier)) {
+        req.user = user;
+        return next(); // Alles okay, weiter zur Route
+    }
+
+    // 3. Zugriff verweigert (Logging & Error)
+    console.warn(`🔒 ALARM: ${user.owner} wollte unbefugt auf Daten von [${requestedSupplier}] zugreifen!`);
+    return res.status(403).json({ 
+        error: "Zugriff verweigert", 
+        message: "Du darfst nur deine eigenen Lieferungen sehen." 
+    });
+};
+
 // --- DATENBANK INITIALISIERUNG ---
 const dbPath = path.resolve(__dirname, 'sensor_data.db');
 const db = new sqlite3.Database(dbPath, (err) => {
@@ -256,6 +286,68 @@ app.post('/api/admin/proof-of-delivery/:supplier/:deliveryId', authenticate, asy
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 });
+
+//3. Supplier Area (/api/supplier)
+
+// 3.1 Eigene, aktive Lieferungen einsehen
+app.get('/api/supplier/:supplier/active', supplierAuth, (req, res) => {
+    const { supplier } = req.params;
+
+    db.all("SELECT delivery_id, sensor_id, timestamp FROM hardware_mappings WHERE supplier_name = ? AND is_active = 1", 
+    [supplier], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({
+            supplier,
+            activeCount: rows.length,
+            deliveries: rows
+        });
+    });
+});
+
+// 3.2 AUDIT (Vergleich SQL vs Blockchain)
+app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, res) => {
+    const { supplier, deliveryId } = req.params;
+
+    try {
+        // 1. Hole Sensor-ID aus lokalem Mapping
+        const mapping = await new Promise((resolve, reject) => {
+            db.get("SELECT sensor_id FROM hardware_mappings WHERE supplier_name = ? AND delivery_id = ?", 
+            [supplier, deliveryId], (err, row) => {
+                if (err || !row) reject(new Error("Lieferung nicht gefunden."));
+                resolve(row);
+            });
+        });
+
+        // 2. Blockchain-Abfrage (Nutzt unseren bewährten GetAssetsByDelivery)
+        if (!contract) await initBlockchain();
+        const bcResult = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
+        const bcData = JSON.parse(Buffer.from(bcResult).toString('utf8'));
+
+        res.json({
+            deliveryId,
+            status: "Audit erfolgreich",
+            blockchainRecords: bcData.length,
+            lastEntry: bcData[0] || null
+        });
+    } catch (error) {
+        res.status(404).json({ error: error.message });
+    }
+});
+
+// 3.3 Gesamte Lieferhistorie einer Lieferung einsehen
+app.get('/api/supplier/:supplier/history/:deliveryId', supplierAuth, async (req, res) => {
+    const { supplier, deliveryId } = req.params;
+    try {
+        if (!contract) await initBlockchain();
+        const result = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
+        const data = JSON.parse(Buffer.from(result).toString('utf8'));
+        
+        res.json(data.sort((a, b) => b.Timestamp - a.Timestamp));
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 
 // --- SERVER START ---
 app.listen(port, '0.0.0.0', () => {
