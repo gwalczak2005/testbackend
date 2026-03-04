@@ -185,14 +185,20 @@ async function sendToHyperledger(id, temp, humidity) {
     }
 }
 
-// API Routes
 
-//1. Developer Area (/api/dev)
+//API-ROUTES
 
-//1.1 Ping für Connectivity Check
+/// ==========================================
+// 1. Developer Area (/api/dev)
+// ==========================================
+
+app.post('/test', (req, res) => {
+    console.log("🎯 TEST-TREFFER!");
+    res.send("Habe dich gehört!");
+});
+
 app.get('/api/dev/ping', (req, res) => res.send("PONG - Entwicklerzugang aktiv!"));
 
-//1.2 Lokale SQL-Logs einsehen
 app.get('/api/dev/buffer-view', (req, res) => {
     db.all("SELECT * FROM sensor_logs ORDER BY timestamp DESC LIMIT 50", [], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -200,20 +206,69 @@ app.get('/api/dev/buffer-view', (req, res) => {
     });
 });
 
-//1.3 Hardware-Mappings im Klartext (Debug)
 app.get('/api/dev/debug-mappings', (req, res) => {
     db.all("SELECT * FROM hardware_mappings", [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
+}); // <--- Diese Klammern haben gefehlt!
 
-//2. Admin Area (/api/admin)
+// --- SENSOR DATA BUFFER (Die Schnittstelle für die Hardware) ---
+app.post('/api/buffer', (req, res) => {
+    const { id, temp, humidity } = req.body;
 
-// 2.1 SENSOR ONBOARDING (Eine neue Lieferung starten)
-app.post('/api/admin/onboard', authenticate, (req, res) => {
+    db.run(`INSERT INTO sensor_logs (id, temp, humidity) VALUES (?, ?, ?)`, 
+    [id, temp, humidity], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+
+        const logId = this.lastID; // Die fortlaufende Nummer des SQL-Eintrags
+
+        db.get(`SELECT * FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1`, [id], async (err, mapping) => {
+            if (mapping) {
+                
+                // === HIER STEHT DIE LOGIK ===
+                // % 2 === 0 bedeutet: Nur bei jedem zweiten Eintrag (2, 4, 6...)
+                if (logId % 2 === 0) { 
+                    try {
+                        if (!contract) await initBlockchain();
+                        
+                        await contract.submitTransaction(
+                            'CreateAsset',
+                            `LOG-${logId}`,
+                            id,
+                            temp.toString(),
+                            humidity.toString(),
+                            mapping.supplier_name,
+                            mapping.delivery_id
+                        );
+                        console.log(`🔗 Blockchain-Sync für ID ${logId} (Jeder 2. Wert)`);
+                    } catch (bcErr) {
+                        console.error("❌ Blockchain-Fehler:", bcErr.message);
+                    }
+                } else {
+                    console.log(`📝 Nur SQL-Log für ID ${logId} (Überspringe Blockchain)`);
+                }
+                // ============================
+
+            }
+            res.json({ status: "Buffered", logId: logId });
+        });
+    });
+});
+
+// ==========================================
+// 2. Admin Area (/api/admin)
+// ==========================================
+
+// 2.1 SENSOR ONBOARDING
+app.post('/api/admin/onboard', supplierAuth, (req, res) => {
+    console.log("📍 ONBOARDING ROUTE ERREICHT!");
     const { sensorId, supplier, delivery } = req.body;
     
+    // Wir prüfen erst auf Konflikte
     db.get(`SELECT * FROM hardware_mappings WHERE (sensor_id = ? OR delivery_id = ?) AND is_active = 1`, 
     [sensorId, delivery], (err, row) => {
+        if (err) return res.status(500).json({ error: err.message });
         if (row) return res.status(409).json({ error: "Konflikt: Sensor oder Lieferung bereits aktiv." });
 
         db.run(`INSERT OR REPLACE INTO hardware_mappings (sensor_id, supplier_name, delivery_id, is_active) VALUES (?, ?, ?, 1)`,
@@ -224,8 +279,8 @@ app.post('/api/admin/onboard', authenticate, (req, res) => {
     });
 });
 
-// 2.2 SET LIMITS (Grenzwerte festlegen)
-app.post('/api/admin/set-limit/:supplier/:deliveryId', authenticate, async (req, res) => {
+// 2.2 SET LIMITS
+app.post('/api/admin/set-limit/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
     const { maxTemp, minTemp, maxHum, minHum } = req.body;
     try {
@@ -236,17 +291,17 @@ app.post('/api/admin/set-limit/:supplier/:deliveryId', authenticate, async (req,
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 2.3 AUDIT (Vergleich SQL vs Blockchain)
-app.get('/api/admin/audit/:supplier/:deliveryId', authenticate, async (req, res) => {
+// 2.3 AUDIT
+app.get('/api/admin/audit/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
     try {
-        const mapping = await new Promise((res, rej) => {
-            db.get("SELECT sensor_id FROM hardware_mappings WHERE supplier_name = ? AND delivery_id = ?", [supplier, deliveryId], (e, r) => e ? rej(e) : res(r));
+        const mapping = await new Promise((resolve, reject) => {
+            db.get("SELECT sensor_id FROM hardware_mappings WHERE supplier_name = ? AND delivery_id = ?", [supplier, deliveryId], (e, r) => e ? reject(e) : resolve(r));
         });
         if (!mapping) return res.status(404).json({ error: "Lieferung nicht gefunden." });
 
-        const sqlLogs = await new Promise((res, rej) => {
-            db.all("SELECT * FROM sensor_logs WHERE id = ?", [mapping.sensor_id], (e, r) => e ? rej(e) : res(r));
+        const sqlLogs = await new Promise((resolve, reject) => {
+            db.all("SELECT * FROM sensor_logs WHERE id = ?", [mapping.sensor_id], (e, r) => e ? reject(e) : resolve(r));
         });
 
         if (!contract) await initBlockchain();
@@ -264,27 +319,8 @@ app.get('/api/admin/audit/:supplier/:deliveryId', authenticate, async (req, res)
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 2.4 HISTORY & WARNINGS (Daten für das Dashboard)
-app.get('/api/admin/history/:supplier/:deliveryId', authenticate, async (req, res) => {
-    const { supplier, deliveryId } = req.params;
-    try {
-        if (!contract) await initBlockchain();
-        const result = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
-        const data = JSON.parse(Buffer.from(result).toString('utf8'));
-        
-        const warnings = data.filter(a => a.IsWarning === true);
-        res.json({ 
-            shipment: deliveryId, 
-            supplier: supplier,
-            totalRecords: data.length, 
-            warningCount: warnings.length,
-            history: data.sort((a,b) => b.Timestamp - a.Timestamp) 
-        });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// 2.5 PROOF-OF-DELIVERY (Lieferung abschließen)
-app.post('/api/admin/proof-of-delivery/:supplier/:deliveryId', authenticate, async (req, res) => {
+// 2.5 PROOF-OF-DELIVERY
+app.post('/api/admin/proof-of-delivery/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
     const { recipientName } = req.body;
     try {
@@ -296,31 +332,23 @@ app.post('/api/admin/proof-of-delivery/:supplier/:deliveryId', authenticate, asy
         });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
-});
 
-//3. Supplier Area (/api/supplier)
+// ==========================================
+// 3. Supplier Area (/api/supplier)
+// ==========================================
 
-// 3.1 Eigene, aktive Lieferungen einsehen
 app.get('/api/supplier/:supplier/active', supplierAuth, (req, res) => {
     const { supplier } = req.params;
-
     db.all("SELECT delivery_id, sensor_id, timestamp FROM hardware_mappings WHERE supplier_name = ? AND is_active = 1", 
     [supplier], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json({
-            supplier,
-            activeCount: rows.length,
-            deliveries: rows
-        });
+        res.json({ supplier, activeCount: rows.length, deliveries: rows });
     });
 });
 
-// 3.2 AUDIT (Vergleich SQL vs Blockchain)
 app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
-
     try {
-        // 1. Hole Sensor-ID aus lokalem Mapping
         const mapping = await new Promise((resolve, reject) => {
             db.get("SELECT sensor_id FROM hardware_mappings WHERE supplier_name = ? AND delivery_id = ?", 
             [supplier, deliveryId], (err, row) => {
@@ -328,35 +356,11 @@ app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, r
                 resolve(row);
             });
         });
-
-        // 2. Blockchain-Abfrage (Nutzt unseren bewährten GetAssetsByDelivery)
         if (!contract) await initBlockchain();
         const bcResult = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
         const bcData = JSON.parse(Buffer.from(bcResult).toString('utf8'));
-
-        res.json({
-            deliveryId,
-            status: "Audit erfolgreich",
-            blockchainRecords: bcData.length,
-            lastEntry: bcData[0] || null
-        });
-    } catch (error) {
-        res.status(404).json({ error: error.message });
-    }
-});
-
-// 3.3 Gesamte Lieferhistorie einer Lieferung einsehen
-app.get('/api/supplier/:supplier/history/:deliveryId', supplierAuth, async (req, res) => {
-    const { supplier, deliveryId } = req.params;
-    try {
-        if (!contract) await initBlockchain();
-        const result = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
-        const data = JSON.parse(Buffer.from(result).toString('utf8'));
-        
-        res.json(data.sort((a, b) => b.Timestamp - a.Timestamp));
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        res.json({ deliveryId, status: "Audit erfolgreich", blockchainRecords: bcData.length });
+    } catch (error) { res.status(404).json({ error: error.message }); }
 });
 
 

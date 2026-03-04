@@ -1,78 +1,84 @@
 const axios = require('axios');
 
-async function runSystemTest() {
-    // --- KONFIGURATION ---
-    const API_URL = "http://localhost:3000";
-    const API_KEY = "DEIN_GEHEIMER_SUPER_KEY_123"; // MUSS mit app.js übereinstimmen!
+async function runTest() {
+    // Ändere localhost auf die explizite IP 127.0.0.1
+    // Das verhindert, dass Node.js versucht, über IPv6 (::1) zu gehen
+    const API_URL = "http://127.0.0.1:3000"; 
+    
+    const ADMIN_KEY = "MASTER_ADMIN_2026"; 
     
     const testData = {
-        supplier: "Enterprise-Logistik-AG",
-        delivery: "SHIP-2026-CONF-777",
-        sensor: "ESP_001"
+        sensorId: "ESP_TEST_84", // Achte auf die exakten Variablennamen aus der app.js
+        supplier: "Supplier_D",
+        delivery: "SHIP-2026-TEST-51"
     };
 
-    // Header für die Admin-Berechtigungen
-    const adminConfig = { 
-        headers: { 'x-api-key': API_KEY } 
+    const config = { 
+        headers: { 
+            'x-api-key': ADMIN_KEY,
+            'Content-Type': 'application/json' 
+        } 
     };
 
-    console.log("🛠️  DEVELOPER-SEED: Starte Test-Szenario...");
+    console.log(`🚀 START: Verbindungstest zu ${API_URL}...`);
 
     try {
-        // SCHRITT 1: Admin-Onboarding
-        console.log(`\n1. Admin: Registriere ${testData.delivery} für ${testData.supplier}...`);
-        const onboardRes = await axios.post(`${API_URL}/api/admin/onboard`, {
-            sensorId: testData.sensor,
+        // SCHRITT 1: ONBOARDING
+        console.log("\n1. Schritt: Onboarding via Admin-Schnittstelle...");
+        
+        // WICHTIG: Prüfe hier den Pfad /api/admin/onboard
+        // In scripts/seed.js
+        const onboard = await axios.post(`${API_URL}/api/admin/onboard`, {
+            sensorId: testData.sensorId, // Prüfe ob der Key hier sensorId heißt!
             supplier: testData.supplier,
             delivery: testData.delivery
-        }, adminConfig);
-        console.log(`✅ ${onboardRes.data.message}`);
+        }, config);        
+        console.log(`✅ Antwort vom Server: ${JSON.stringify(onboard.data)}`);
 
-        // SCHRITT 2: Sensor-Simulation
-        console.log(`\n2. Sensor: Sende 4 Datenpakete an den Buffer...`);
+        // ... restliches Skript ...
+
+        // 2. DATEN-BUFFER (Sensor simuliert)
+        console.log("\n2. Schritt: Sende 4 Messwerte...");
         for (let i = 1; i <= 4; i++) {
-            const sensorPayload = {
-                id: testData.sensor,
-                temp: (20.5 + i * 0.3).toFixed(1),
-                humidity: (55 + i).toFixed(1)
-            };
-            await axios.post(`${API_URL}/api/buffer`, sensorPayload);
-            console.log(`📡 Paket ${i}/4 gesendet.`);
-            await new Promise(r => setTimeout(r, 500)); // Kurze Pause
+            await axios.post(`${API_URL}/api/buffer`, {
+                id: testData.sensorId, // WICHTIG: Das Feld MUSS 'id' heißen (wie in app.js definiert)
+                temp: (20 + i).toFixed(1),
+                humidity: 50
+            });
+            process.stdout.write("."); 
+            await new Promise(r => setTimeout(r, 500)); // Kurze Pause für die DB
         }
 
-        // SCHRITT 3: Wartezeit für Blockchain-Finalisierung
-        console.log(`\n⏳ Warte 5 Sekunden auf die Blockchain-Bestätigung...`);
+        // 3. WARTEZEIT (Blockchain braucht einen Moment)
+        console.log("\n\n3. Schritt: Warte 5s auf Blockchain-Finalisierung...");
         await new Promise(r => setTimeout(r, 5000));
 
-        // SCHRITT 4: Admin-Audit (Triangle-Logik Pfad)
-        console.log(`\n3. Admin: Starte Audit für ${testData.supplier} / ${testData.delivery}...`);
-        const auditUrl = `${API_URL}/api/admin/audit/${testData.supplier}/${testData.testDelivery}`;
-        
-        // Kleine Korrektur für den URL-Zusammenbau:
-        const auditRes = await axios.get(`${API_URL}/api/admin/audit/${testData.supplier}/${testData.delivery}`, adminConfig);
+        // 4. AUDIT (Triangle-Logik)
+        console.log(`\n4. Schritt: Audit-Abfrage für ${testData.supplier}/${testData.delivery}...`);
+        const audit = await axios.get(
+            `${API_URL}/api/admin/audit/${testData.supplier}/${testData.delivery}`, 
+            config
+        );
 
-        console.log("\n--- AUDIT ERGEBNIS ---");
-        console.log(`Status: ${auditRes.data.integrity}`);
-        console.log(`SQL Einträge: ${auditRes.data.details.sql}`);
-        console.log(`Blockchain Einträge: ${auditRes.data.details.blockchain}`);
-        console.log(`Erwartet: ${auditRes.data.details.expected}`);
-        console.log("----------------------\n");
+        console.log("\n--- TEST-ERGEBNIS ---");
+        console.log(`Integrität: ${audit.data.integrity}`);
+        console.log(`SQL Einträge: ${audit.data.details.sql}`);
+        console.log(`Blockchain: ${audit.data.details.blockchain}`);
+        console.log("----------------------");
 
-        if (auditRes.data.integrity.includes("VERIFIED")) {
-            console.log("✨ Test erfolgreich! Das System ist bereit für das Großunternehmen.");
-        } else {
-            console.log("⚠️  Integritätsprüfung fehlgeschlagen. Prüfe Backend-Logs.");
+        if (audit.data.integrity.includes("VERIFIED")) {
+            console.log("✨ ALLES LÄUFT REIBUNGSLOS!");
         }
 
     } catch (error) {
-        console.error("\n❌ Fehler im Testlauf:");
+        console.error("\n❌ TEST FEHLGESCHLAGEN:");
         if (error.response) {
-            console.error(`Status: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
+            console.error(`Status: ${error.response.status}`);
+            console.error(`Nachricht: ${JSON.stringify(error.response.data)}`);
         } else {
             console.error(error.message);
         }
     }
 }
 
-runSystemTest();
+runTest();
