@@ -43,10 +43,17 @@ cp organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com
 cp organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/signcerts/cert.pem $APP_WALLET/msp/signcerts/
 cp organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp/keystore/* $APP_WALLET/msp/keystore/
 
+# 7. Erstellung der DB
+sqlite3 ./application/sensor_data.db <<EOF
+CREATE TABLE IF NOT EXISTS api_users (id INTEGER PRIMARY KEY AUTOINCREMENT, api_key TEXT UNIQUE, role TEXT, owner TEXT);
+INSERT INTO api_users (api_key, role, owner) VALUES ('MASTER_ADMIN_2026', 'ADMIN', 'Großunternehmen');
+EOF
+
+echo "✅ Datenbank-Reset durchgeführt und Standard-API-Keys hinterlegt."
 echo "⏳ Kurze Pause für den Chaincode-Container (15s)..."
 sleep 15
 
 echo "--------------------------------------------------"
-echo "✅ SYSTEM IST JETZT ABSOLUT SAUBER UND BEREIT"
+echo "✅ SYSTEM BEREIT"
 echo "👉 Starte Backend mit: node $PROJECT_ROOT/application/app.js"
 echo "--------------------------------------------------"

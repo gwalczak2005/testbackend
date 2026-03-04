@@ -65,19 +65,30 @@ const db = new sqlite3.Database(dbPath, (err) => {
     }
 });
 
-// --- DATENBANK ERWEITERUNG --- (für Onboarding-Prozess)
+// --- DATENBANK ERWEITERUNG ---
 db.serialize(() => {
-    // Deine bestehende Log-Tabelle
+    // 1. Deine bestehende Log-Tabelle (Rohdaten)
     db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
-        id TEXT, temp REAL, humidity REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        id TEXT, 
+        temp REAL, 
+        humidity REAL, 
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // NEU: Mapping-Tabelle für Onboarding
+    // 2. Mapping-Tabelle für Onboarding (Zuweisung Sensor -> Fahrt)
     db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
         sensor_id TEXT PRIMARY KEY,
         supplier_name TEXT,
         delivery_id TEXT,
         is_active INTEGER DEFAULT 1
+    )`);
+
+    // 3. NEU: Die User-Tabelle für API-Keys (Sicherheit & Mandanten)
+    db.run(`CREATE TABLE IF NOT EXISTS api_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        api_key TEXT UNIQUE,
+        role TEXT,  -- 'ADMIN' oder 'SUPPLIER'
+        owner TEXT  -- Name des Großunternehmens oder des Lieferanten
     )`);
 });
 
