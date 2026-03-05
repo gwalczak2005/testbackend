@@ -30,26 +30,38 @@ const API_KEYS = {
 };
 
 const supplierAuth = (req, res, next) => {
-    const apiKey = req.headers['x-api-key'];
-    const user = API_KEYS[apiKey];
+    // 1. Key aus Header ODER URL-Parameter (ADMIN_KEY oder apiKey) extrahieren
+    const apiKey = req.headers['x-api-key'] || req.query.ADMIN_KEY || req.query.apiKey;
     const requestedSupplier = req.params.supplier;
 
-    // 1. Key-Check
-    if (!user) {
-        return res.status(401).json({ error: "Ungültiger Key." });
+    if (!apiKey) {
+        return res.status(401).json({ error: "Kein API-Key bereitgestellt." });
     }
 
-    // 2. Berechtigungs-Check (Admin darf alles | Supplier nur sein eigenes)
-    if (user.role === "ADMIN" || (user.role === "SUPPLIER" && user.owner === requestedSupplier)) {
-        req.user = user;
-        return next(); // Alles okay, weiter zur Route
-    }
+    // 2. In der Datenbank nach dem User suchen
+    db.get(`SELECT * FROM api_users WHERE api_key = ?`, [apiKey], (err, user) => {
+        if (err || !user) {
+            return res.status(401).json({ error: "Ungültiger Key." });
+        }
 
-    // 3. Zugriff verweigert (Logging & Error)
-    console.warn(`🔒 ALARM: ${user.owner} wollte unbefugt auf Daten von [${requestedSupplier}] zugreifen!`);
-    return res.status(403).json({ 
-        error: "Zugriff verweigert", 
-        message: "Du darfst nur deine eigenen Lieferungen sehen." 
+        // 3. Berechtigungs-Check
+        // Admin darf alles ODER Supplier darf nur auf seine eigenen Daten (req.params.supplier) zugreifen
+        const isAdmin = user.role === "ADMIN";
+        const isOwner = user.owner === requestedSupplier;
+
+        // Wenn kein spezifischer Supplier in der URL (z.B. bei /api/admin/alerts), 
+        // lassen wir Admins einfach durch.
+        if (isAdmin || (user.role === "SUPPLIER" && isOwner) || (!requestedSupplier && isAdmin)) {
+            req.user = user; // Wichtig für die Routen (req.user.owner/role)
+            return next();
+        }
+
+        // 4. Zugriff verweigert
+        console.warn(`🔒 ALARM: ${user.owner} wollte unbefugt auf [${requestedSupplier}] zugreifen!`);
+        return res.status(403).json({ 
+            error: "Zugriff verweigert", 
+            message: "Du darfst nur deine eigenen Daten sehen." 
+        });
     });
 };
 
@@ -72,26 +84,39 @@ db.serialize(() => {
         humidity REAL,
         is_alarm INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`, (err) => {
-        if (err) console.error("❌ Fehler sensor_logs:", err.message);
-        else console.log("✅ Tabelle sensor_logs ist bereit.");
-    });
+    )`);
 
     // 2. Mapping-Tabelle
+    // In db.serialize()
     db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
         sensor_id TEXT PRIMARY KEY,
         supplier_name TEXT,
         delivery_id TEXT,
-        is_active INTEGER DEFAULT 1
+        is_active INTEGER DEFAULT 1,
+        status TEXT DEFAULT 'IN_TRANSIT' -- Neu hinzugefügt
     )`);
 
     // 3. User-Tabelle
+    // 3. User-Tabelle & Default-Admin
     db.run(`CREATE TABLE IF NOT EXISTS api_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         api_key TEXT UNIQUE,
-        role TEXT,
-        owner TEXT
-    )`);
+        role TEXT,  -- 'ADMIN' oder 'SUPPLIER'
+        owner TEXT  -- Name des Großunternehmens oder des Lieferanten
+    )`, (err) => {
+        if (!err) {
+            // Legt den Master-Admin automatisch an, falls er noch nicht existiert
+            const insertAdmin = `INSERT OR IGNORE INTO api_users (api_key, role, owner) 
+                                VALUES (?, ?, ?)`;
+            db.run(insertAdmin, ['MASTER_ADMIN_2026', 'ADMIN', 'Großunternehmen AG'], (err) => {
+                if (err) console.error("❌ Fehler beim Anlegen des Default-Admins:", err.message);
+                else console.log("✅ Default-Admin 'MASTER_ADMIN_2026' ist einsatzbereit.");
+            });
+
+            // Optional: Einen Test-Supplier anlegen für das Supplier-Dashboard
+            db.run(insertAdmin, ['SUPPLIER_A_KEY', 'SUPPLIER', 'Supplier_A']);
+        }
+    });
 });
 
 // --- HYPERLEDGER FUNKTIONEN ---
@@ -350,45 +375,81 @@ app.get('/api/admin/audit/:supplier/:deliveryId', supplierAuth, async (req, res)
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 2.5 PROOF-OF-DELIVERY
-app.post('/api/admin/proof-of-delivery/:supplier/:deliveryId', supplierAuth, async (req, res) => {
+// 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
+app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
-    const { recipientName } = req.body;
+    const { recipientName } = req.body; // Das Großunternehmen
+
     try {
         if (!contract) await initBlockchain();
+        
+        // 1. Unveränderlicher Eintrag auf der Blockchain
         await contract.submitTransaction('ConfirmDelivery', supplier, deliveryId, recipientName);
-        db.run(`UPDATE hardware_mappings SET is_active = 0 WHERE delivery_id = ?`, [deliveryId], (err) => {
+        
+        // 2. SQL Status ändern, aber NOCH NICHT deaktivieren
+        db.run(`UPDATE hardware_mappings SET status = 'DELIVERED' WHERE delivery_id = ?`, [deliveryId], (err) => {
             if (err) return res.status(500).json({ error: err.message });
-            res.json({ status: "Success", message: `Lieferung ${deliveryId} archiviert.` });
+            res.json({ 
+                status: "Success", 
+                message: `Erhalt von ${deliveryId} durch ${recipientName} bestätigt. Warte auf Checkout durch Lieferant.` 
+            });
+        });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
+app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async (req, res) => {
+    const { supplier, deliveryId } = req.params;
+    const recipientName = "Großunternehmen AG"; // Festgelegt für Phase 1
+
+    try {
+        if (!contract) await initBlockchain();
+        // Blockchain-Beweis
+        await contract.submitTransaction('ConfirmDelivery', supplier, deliveryId, recipientName);
+        
+        // SQL-Update: Status ändern
+        db.run(`UPDATE hardware_mappings SET status = 'DELIVERED' WHERE delivery_id = ?`, [deliveryId], (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ status: "Success", message: "Erhalt bestätigt. Status: DELIVERED" });
+        });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// 2.5b FINAL CHECKOUT (Lieferant bestätigt Daten & schließt ab)
+app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async (req, res) => {
+    const { supplier, deliveryId } = req.params;
+
+    try {
+        // Hier könnte man noch eine Blockchain-Transaktion 'FinalizeDelivery' hinzufügen, 
+        // falls im Smart Contract vorgesehen.
+        
+        // Jetzt erst wird die Lieferung für das "Live-System" unsichtbar (is_active = 0)
+        db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId], (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ status: "Success", message: `Lieferung ${deliveryId} vollständig abgeschlossen und archiviert.` });
         });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // 2.6 ALARM-DASHBOARD (Nur Warnungen abrufen)
 app.get('/api/admin/alerts', supplierAuth, async (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Nur für Admins" });
     try {
         if (!contract) await initBlockchain();
-        
-        // Holt alle Assets über alle Lieferanten hinweg
+        // Nutzt die Chaincode-Funktion für den Gesamtüberblick
         const result = await contract.evaluateTransaction('GetAllAssets');
         const allData = JSON.parse(Buffer.from(result).toString('utf8'));
         
-        // Filtert nur die echten Probleme heraus
         const alerts = allData.filter(asset => asset.IsWarning === true);
-        
-        res.json({
-            count: alerts.length,
-            alerts: alerts.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp))
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        res.json({ count: alerts.length, alerts });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ==========================================
 // 3. Supplier Area (/api/supplier)
 // ==========================================
 
+// 3.1 Einsehen aller aktiven Lieferungen
 app.get('/api/supplier/:supplier/active', supplierAuth, (req, res) => {
     const { supplier } = req.params;
     db.all("SELECT delivery_id, sensor_id, timestamp FROM hardware_mappings WHERE supplier_name = ? AND is_active = 1", 
@@ -398,6 +459,7 @@ app.get('/api/supplier/:supplier/active', supplierAuth, (req, res) => {
     });
 });
 
+// 3.2 Einsehen der Blockchain-Datenintegrität für den Lieferanten
 app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
     try {
@@ -413,6 +475,32 @@ app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, r
         const bcData = JSON.parse(Buffer.from(bcResult).toString('utf8'));
         res.json({ deliveryId, status: "Audit erfolgreich", blockchainRecords: bcData.length });
     } catch (error) { res.status(404).json({ error: error.message }); }
+});
+
+// 3.3 Einsehen aller Alarme für den Lieferanten
+app.get('/api/supplier/alerts', supplierAuth, async (req, res) => {
+    // Wir nehmen den Namen des Lieferanten direkt aus seinem authentifizierten API-Key
+    const supplierName = req.user.owner; 
+
+    try {
+        if (!contract) await initBlockchain();
+
+        // NUTZT DIE SPEZIFISCHE CHAINCODE-LOGIK:
+        // GetAssetsBySupplier(ctx, supplierName)
+        const result = await contract.evaluateTransaction('GetAssetsBySupplier', supplierName);
+        const myAssets = JSON.parse(Buffer.from(result).toString('utf8'));
+        
+        // Filtert nur die Warnungen aus SEINEN Assets
+        const myAlerts = myAssets.filter(asset => asset.IsWarning === true);
+        
+        res.json({
+            supplier: supplierName,
+            count: myAlerts.length,
+            alerts: myAlerts
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 
