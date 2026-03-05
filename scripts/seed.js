@@ -8,9 +8,9 @@ async function runTest() {
     const ADMIN_KEY = "MASTER_ADMIN_2026"; 
     
     const testData = {
-        sensorId: "ESP_TEST_84", // Achte auf die exakten Variablennamen aus der app.js
-        supplier: "Supplier_D",
-        delivery: "SHIP-2026-TEST-51"
+        sensorId: "ESP_TEST_02", // Achte auf die exakten Variablennamen aus der app.js
+        supplier: "Supplier_A",
+        delivery: "SHIP-2026-TEST-02"
     };
 
     const config = { 
@@ -37,17 +37,27 @@ async function runTest() {
 
         // ... restliches Skript ...
 
-        // 2. DATEN-BUFFER (Sensor simuliert)
-        console.log("\n2. Schritt: Sende 4 Messwerte...");
-        for (let i = 1; i <= 4; i++) {
-            await axios.post(`${API_URL}/api/buffer`, {
-                id: testData.sensorId, // WICHTIG: Das Feld MUSS 'id' heißen (wie in app.js definiert)
-                temp: (20 + i).toFixed(1),
-                humidity: 50
-            });
-            process.stdout.write("."); 
-            await new Promise(r => setTimeout(r, 500)); // Kurze Pause für die DB
-        }
+            // 2. Schritt: Sende 4 Messwerte (Einer davon ist ein Alarm!)
+    console.log("\n2. Schritt: Sende 4 Messwerte...");
+    const readings = [
+        { t: 22.1, h: 50 }, // OK
+        { t: 22.5, h: 51 }, // OK (Geht auf BC wegen Modulo 2)
+        { t: 35.8, h: 55 }, // ALARM! (>30°C, geht SOFORT auf BC)
+        { t: 23.2, h: 50 }  // OK (Geht auf BC wegen Modulo 4)
+    ];
+
+    for (let i = 0; i < readings.length; i++) {
+        const res = await axios.post(`${API_URL}/api/buffer`, {
+            id: testData.sensorId,
+            temp: readings[i].t,
+            humidity: readings[i].h
+        });
+        
+        const alarmStatus = res.data.alarmTriggered ? "🚨 ALARM!" : "✅ OK";
+        console.log(`   Wert ${i+1}: ${readings[i].t}°C -> ${alarmStatus}`);
+        
+        await new Promise(r => setTimeout(r, 800)); 
+    }
 
         // 3. WARTEZEIT (Blockchain braucht einen Moment)
         console.log("\n\n3. Schritt: Warte 5s auf Blockchain-Finalisierung...");

@@ -53,29 +53,31 @@ const supplierAuth = (req, res, next) => {
     });
 };
 
-// --- DATENBANK INITIALISIERUNG ---
+// --- DATENBANK INITIALISIERUNG & SCHEMA ---
 const dbPath = path.resolve(__dirname, 'sensor_data.db');
 const db = new sqlite3.Database(dbPath, (err) => {
-    if (err) console.error("Fehler beim Öffnen der DB:", err.message);
-    else {
+    if (err) {
+        console.error("Fehler beim Öffnen der DB:", err.message);
+    } else {
         console.log("✅ SQLite-Datenbank verbunden.");
-        db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
-            id TEXT, temp REAL, humidity REAL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )`);
     }
 });
 
-// --- DATENBANK ERWEITERUNG ---
 db.serialize(() => {
-    // 1. Deine bestehende Log-Tabelle (Rohdaten)
+    // 1. Die Log-Tabelle (Rohdaten) - JETZT NUR NOCH EINMAL UND RICHTIG!
     db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
-        id TEXT, 
-        temp REAL, 
-        humidity REAL, 
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sensor_id TEXT,
+        temp REAL,
+        humidity REAL,
+        is_alarm INTEGER DEFAULT 0,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
+    )`, (err) => {
+        if (err) console.error("❌ Fehler sensor_logs:", err.message);
+        else console.log("✅ Tabelle sensor_logs ist bereit.");
+    });
 
-    // 2. Mapping-Tabelle für Onboarding (Zuweisung Sensor -> Fahrt)
+    // 2. Mapping-Tabelle
     db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
         sensor_id TEXT PRIMARY KEY,
         supplier_name TEXT,
@@ -83,12 +85,12 @@ db.serialize(() => {
         is_active INTEGER DEFAULT 1
     )`);
 
-    // 3. NEU: Die User-Tabelle für API-Keys (Sicherheit & Mandanten)
+    // 3. User-Tabelle
     db.run(`CREATE TABLE IF NOT EXISTS api_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         api_key TEXT UNIQUE,
-        role TEXT,  -- 'ADMIN' oder 'SUPPLIER'
-        owner TEXT  -- Name des Großunternehmens oder des Lieferanten
+        role TEXT,
+        owner TEXT
     )`);
 });
 
@@ -213,45 +215,74 @@ app.get('/api/dev/debug-mappings', (req, res) => {
     });
 }); // <--- Diese Klammern haben gefehlt!
 
-// --- SENSOR DATA BUFFER (Die Schnittstelle für die Hardware) ---
+// --- SENSOR DATA BUFFER (Diabere Schnittstelle für die Hardware) ---
 app.post('/api/buffer', (req, res) => {
-    const { id, temp, humidity } = req.body;
+    const { id, temp, humidity } = req.body; // 'id' ist z.B. "ESP_TEST_01"
+    
+    // 1. Alarm-Logik: Grenzwertprüfung (Sollte mit Chaincode-Logik übereinstimmen)
+    const isAlarm = (temp > 30.0 || temp < 2.0) ? 1 : 0;
 
-    db.run(`INSERT INTO sensor_logs (id, temp, humidity) VALUES (?, ?, ?)`, 
-    [id, temp, humidity], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
+    // 2. In SQL speichern (Spalte 'id' wird automatisch durch AUTOINCREMENT befüllt)
+    const sql = `INSERT INTO sensor_logs (sensor_id, temp, humidity, is_alarm) VALUES (?, ?, ?, ?)`;
+    const params = [id, temp, humidity, isAlarm];
 
-        const logId = this.lastID; // Die fortlaufende Nummer des SQL-Eintrags
+    db.run(sql, params, function(err) {
+        if (err) {
+            console.error("❌ SQL Fehler beim Speichern:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
 
+        const logId = this.lastID; // Die fortlaufende Nummer aus der SQLite DB
+        console.log(`✅ SQL Log gespeichert. ID: ${logId}, Sensor: ${id}, Temp: ${temp}°C`);
+
+        // 3. Mapping prüfen: Gehört dieser Sensor zu einer aktiven Lieferung?
         db.get(`SELECT * FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1`, [id], async (err, mapping) => {
+            if (err) {
+                console.error("❌ Fehler bei Mapping-Abfrage:", err.message);
+                return;
+            }
+
             if (mapping) {
-                
-                // === HIER STEHT DIE LOGIK ===
-                // % 2 === 0 bedeutet: Nur bei jedem zweiten Eintrag (2, 4, 6...)
-                if (logId % 2 === 0) { 
+                // LOGIK: Jeder 2. Wert (Modulo) ODER wenn es ein Alarm ist (Sicherheit geht vor!)
+                if (logId % 2 === 0 || isAlarm === 1) {
                     try {
-                        if (!contract) await initBlockchain();
+                        // Sicherstellen, dass die Blockchain-Verbindung steht
+                        if (!contract) {
+                            console.log("🔗 Initialisiere Blockchain-Verbindung...");
+                            await initBlockchain();
+                        }
                         
+                        console.log(`📡 Sende an Blockchain: [LOG-${logId}] für ${mapping.delivery_id}...`);
+
+                        // CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId)
                         await contract.submitTransaction(
                             'CreateAsset',
-                            `LOG-${logId}`,
-                            id,
-                            temp.toString(),
-                            humidity.toString(),
-                            mapping.supplier_name,
-                            mapping.delivery_id
+                            `LOG-${logId}`,          // Eindeutige Blockchain-Asset-ID
+                            id,                      // sensor_id vom Gerät
+                            temp.toString(),         // Muss als String übertragen werden
+                            humidity.toString(),     // Muss als String übertragen werden
+                            mapping.supplier_name,   // Aus dem SQL-Mapping
+                            mapping.delivery_id      // Aus dem SQL-Mapping
                         );
-                        console.log(`🔗 Blockchain-Sync für ID ${logId} (Jeder 2. Wert)`);
+
+                        console.log(`✅ Blockchain-Sync erfolgreich: LOG-${logId}`);
                     } catch (bcErr) {
-                        console.error("❌ Blockchain-Fehler:", bcErr.message);
+                        console.error("❌ Blockchain-Transaktionsfehler:", bcErr.message);
                     }
                 } else {
-                    console.log(`📝 Nur SQL-Log für ID ${logId} (Überspringe Blockchain)`);
+                    console.log(`📝 Nur SQL-Log (ID ${logId} ist ungerade & kein Alarm).`);
                 }
-                // ============================
-
+            } else {
+                console.log(`⚠️ Sensor ${id} hat kein aktives Mapping. Kein Blockchain-Upload.`);
             }
-            res.json({ status: "Buffered", logId: logId });
+        });
+
+        // Antwort an den Sensor (oder das Seed-Skript)
+        res.json({ 
+            status: "Buffered", 
+            logId: logId, 
+            alarmTriggered: !!isAlarm,
+            blockchainSynced: (logId % 2 === 0 || isAlarm === 1)
         });
     });
 });
@@ -301,7 +332,7 @@ app.get('/api/admin/audit/:supplier/:deliveryId', supplierAuth, async (req, res)
         if (!mapping) return res.status(404).json({ error: "Lieferung nicht gefunden." });
 
         const sqlLogs = await new Promise((resolve, reject) => {
-            db.all("SELECT * FROM sensor_logs WHERE id = ?", [mapping.sensor_id], (e, r) => e ? reject(e) : resolve(r));
+            db.all("SELECT * FROM sensor_logs WHERE sensor_id = ?", [mapping.sensor_id], (e, r) => e ? reject(e) : resolve(r));
         });
 
         if (!contract) await initBlockchain();
@@ -331,6 +362,27 @@ app.post('/api/admin/proof-of-delivery/:supplier/:deliveryId', supplierAuth, asy
             res.json({ status: "Success", message: `Lieferung ${deliveryId} archiviert.` });
         });
     } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// 2.6 ALARM-DASHBOARD (Nur Warnungen abrufen)
+app.get('/api/admin/alerts', supplierAuth, async (req, res) => {
+    try {
+        if (!contract) await initBlockchain();
+        
+        // Holt alle Assets über alle Lieferanten hinweg
+        const result = await contract.evaluateTransaction('GetAllAssets');
+        const allData = JSON.parse(Buffer.from(result).toString('utf8'));
+        
+        // Filtert nur die echten Probleme heraus
+        const alerts = allData.filter(asset => asset.IsWarning === true);
+        
+        res.json({
+            count: alerts.length,
+            alerts: alerts.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp))
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // ==========================================
