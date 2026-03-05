@@ -241,73 +241,47 @@ app.get('/api/dev/debug-mappings', (req, res) => {
 }); // <--- Diese Klammern haben gefehlt!
 
 // --- SENSOR DATA BUFFER (Diabere Schnittstelle für die Hardware) ---
-app.post('/api/buffer', (req, res) => {
-    const { id, temp, humidity } = req.body; // 'id' ist z.B. "ESP_TEST_01"
+app.post('/api/buffer', supplierAuth, (req, res) => {
+    const { id, temp, humidity } = req.body; // id ist hier die reine Hardware-ID, z.B. "01"
+    const supplierPrefix = req.user.owner;   // "Supplier_A" (aus dem API-Key extrahiert)
     
-    // 1. Alarm-Logik: Grenzwertprüfung (Sollte mit Chaincode-Logik übereinstimmen)
+    // 1. Die eindeutige ID für die Datenbank-Suche zusammenbauen
+    const uniqueId = `${supplierPrefix}_${id}`; 
+
     const isAlarm = (temp > 30.0 || temp < 2.0) ? 1 : 0;
 
-    // 2. In SQL speichern (Spalte 'id' wird automatisch durch AUTOINCREMENT befüllt)
+    // 2. In SQL speichern (Wir loggen die uniqueId)
     const sql = `INSERT INTO sensor_logs (sensor_id, temp, humidity, is_alarm) VALUES (?, ?, ?, ?)`;
-    const params = [id, temp, humidity, isAlarm];
+    
+    db.run(sql, [uniqueId, temp, humidity, isAlarm], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
 
-    db.run(sql, params, function(err) {
-        if (err) {
-            console.error("❌ SQL Fehler beim Speichern:", err.message);
-            return res.status(500).json({ error: err.message });
-        }
+        const logId = this.lastID;
+        // 3. Eindeutige Blockchain-ID mit Zeitstempel gegen DB-Reset-Kollisionen
+        const bcAssetId = `LOG-${Date.now()}-${logId}`;
 
-        const logId = this.lastID; // Die fortlaufende Nummer aus der SQLite DB
-        console.log(`✅ SQL Log gespeichert. ID: ${logId}, Sensor: ${id}, Temp: ${temp}°C`);
-
-        // 3. Mapping prüfen: Gehört dieser Sensor zu einer aktiven Lieferung?
-        db.get(`SELECT * FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1`, [id], async (err, mapping) => {
-            if (err) {
-                console.error("❌ Fehler bei Mapping-Abfrage:", err.message);
-                return;
-            }
-
+        db.get(`SELECT * FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1`, [uniqueId], async (err, mapping) => {
             if (mapping) {
-                // LOGIK: Jeder 2. Wert (Modulo) ODER wenn es ein Alarm ist (Sicherheit geht vor!)
                 if (logId % 2 === 0 || isAlarm === 1) {
                     try {
-                        // Sicherstellen, dass die Blockchain-Verbindung steht
-                        if (!contract) {
-                            console.log("🔗 Initialisiere Blockchain-Verbindung...");
-                            await initBlockchain();
-                        }
+                        if (!contract) await initBlockchain();
                         
-                        console.log(`📡 Sende an Blockchain: [LOG-${logId}] für ${mapping.delivery_id}...`);
-
-                        // CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId)
                         await contract.submitTransaction(
                             'CreateAsset',
-                            `LOG-${logId}`,          // Eindeutige Blockchain-Asset-ID
-                            id,                      // sensor_id vom Gerät
-                            temp.toString(),         // Muss als String übertragen werden
-                            humidity.toString(),     // Muss als String übertragen werden
-                            mapping.supplier_name,   // Aus dem SQL-Mapping
-                            mapping.delivery_id      // Aus dem SQL-Mapping
+                            bcAssetId,
+                            uniqueId, // Hier wird die Supplier-spezifische ID auf der Blockchain gespeichert
+                            temp.toString(),
+                            humidity.toString(),
+                            mapping.supplier_name,
+                            mapping.delivery_id
                         );
-
-                        console.log(`✅ Blockchain-Sync erfolgreich: LOG-${logId}`);
+                        console.log(`✅ Blockchain-Sync: ${bcAssetId}`);
                     } catch (bcErr) {
-                        console.error("❌ Blockchain-Transaktionsfehler:", bcErr.message);
+                        console.error("❌ Blockchain-Fehler:", bcErr.message);
                     }
-                } else {
-                    console.log(`📝 Nur SQL-Log (ID ${logId} ist ungerade & kein Alarm).`);
                 }
-            } else {
-                console.log(`⚠️ Sensor ${id} hat kein aktives Mapping. Kein Blockchain-Upload.`);
             }
-        });
-
-        // Antwort an den Sensor (oder das Seed-Skript)
-        res.json({ 
-            status: "Buffered", 
-            logId: logId, 
-            alarmTriggered: !!isAlarm,
-            blockchainSynced: (logId % 2 === 0 || isAlarm === 1)
+            res.json({ status: "Buffered", systemId: uniqueId, blockchainId: bcAssetId });
         });
     });
 });
@@ -318,20 +292,17 @@ app.post('/api/buffer', (req, res) => {
 
 // 2.1 SENSOR ONBOARDING
 app.post('/api/admin/onboard', supplierAuth, (req, res) => {
-    console.log("📍 ONBOARDING ROUTE ERREICHT!");
-    const { sensorId, supplier, delivery } = req.body;
-    
-    // Wir prüfen erst auf Konflikte
-    db.get(`SELECT * FROM hardware_mappings WHERE (sensor_id = ? OR delivery_id = ?) AND is_active = 1`, 
-    [sensorId, delivery], (err, row) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (row) return res.status(409).json({ error: "Konflikt: Sensor oder Lieferung bereits aktiv." });
+    const { hardwareId, supplierName, deliveryId } = req.body;
 
-        db.run(`INSERT OR REPLACE INTO hardware_mappings (sensor_id, supplier_name, delivery_id, is_active) VALUES (?, ?, ?, 1)`,
-        [sensorId, supplier, delivery], (err) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ message: `Lieferung ${delivery} für ${supplier} gestartet.` });
-        });
+    // Erstelle die eindeutige System-ID
+    const uniqueSensorId = `${supplierName}_${hardwareId}`;
+
+    const sql = `INSERT INTO hardware_mappings (sensor_id, supplier_name, delivery_id, is_active, status) 
+                 VALUES (?, ?, ?, 1, 'IN_TRANSIT')`;
+
+    db.run(sql, [uniqueSensorId, supplierName, deliveryId], (err) => {
+        if (err) return res.status(500).json({ error: "Sensor bereits belegt oder Fehler: " + err.message });
+        res.json({ status: "Success", systemId: uniqueSensorId });
     });
 });
 
