@@ -355,32 +355,87 @@ app.post('/api/admin/set-limit/:supplier/:deliveryId', supplierAuth, async (req,
     }
 });
 
-// 2.3 AUDIT
+// 2.3 DEEP-AUDIT (Vgl. der Blockchain-Daten mit der SQL)
 app.get('/api/admin/audit/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
+    
     try {
+        // 1. Sensor-ID der Lieferung ermitteln
         const mapping = await new Promise((resolve, reject) => {
-            db.get("SELECT sensor_id FROM hardware_mappings WHERE supplier_name = ? AND delivery_id = ?", [supplier, deliveryId], (e, r) => e ? reject(e) : resolve(r));
+            db.get("SELECT sensor_id FROM hardware_mappings WHERE supplier_name = ? AND delivery_id = ?", 
+            [supplier, deliveryId], (e, r) => e ? reject(e) : resolve(r));
         });
         if (!mapping) return res.status(404).json({ error: "Lieferung nicht gefunden." });
 
+        // 2. Alle lokalen Rohdaten aus SQLite laden
         const sqlLogs = await new Promise((resolve, reject) => {
             db.all("SELECT * FROM sensor_logs WHERE sensor_id = ?", [mapping.sensor_id], (e, r) => e ? reject(e) : resolve(r));
         });
 
+        // Beschleunigung: SQLite-Daten in ein Dictionary (Map) packen, geordnet nach 'id'
+        const localDataMap = {};
+        sqlLogs.forEach(log => localDataMap[log.id] = log);
+
+        // 3. Unveränderliche Daten aus der Blockchain laden
         if (!contract) await initBlockchain();
         const bcResult = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
         const bcData = JSON.parse(Buffer.from(bcResult).toString('utf8'));
 
-        const expected = Math.floor(sqlLogs.length / 2);
-        const isConsistent = Math.abs(bcData.length - expected) <= 1;
+        // 4. DER DEEP-CHECK LOGIK-KERN
+        let isConsistent = true;
+        const discrepancies = [];
 
+        for (const bcRecord of bcData) {
+            // Blockchain-ID splitten: LOG-1741251780-45 -> Teile: ["LOG", "1741251780", "45"]
+            const idParts = bcRecord.ID.split('-');
+            const sqlId = parseInt(idParts[2], 10); 
+
+            const localRecord = localDataMap[sqlId];
+
+            if (!localRecord) {
+                // Fall A: Jemand hat den Datensatz in der SQLite-Datenbank GELÖSCHT!
+                isConsistent = false;
+                discrepancies.push({
+                    id: bcRecord.ID,
+                    issue: "Datensatz fehlt lokal (Gelöscht!)",
+                    blockchain: { temp: bcRecord.Temperature, humidity: bcRecord.Humidity },
+                    local: null
+                });
+            } else {
+                // Fall B: Datensatz ist da. Wir prüfen auf nachträgliche MANIPULATION.
+                // Kleine Toleranz (< 0.01) für eventuelle Float-Rundungsfehler in JavaScript
+                const tempMatch = Math.abs(bcRecord.Temperature - localRecord.temp) < 0.01;
+                const humMatch = Math.abs(bcRecord.Humidity - localRecord.humidity) < 0.01;
+
+                if (!tempMatch || !humMatch) {
+                    isConsistent = false;
+                    discrepancies.push({
+                        id: bcRecord.ID,
+                        issue: "Lokale Daten wurden manipuliert!",
+                        blockchain: { temp: bcRecord.Temperature, humidity: bcRecord.Humidity },
+                        local: { temp: localRecord.temp, humidity: localRecord.humidity }
+                    });
+                }
+            }
+        }
+
+        // 5. Ergebnis an das Dashboard senden
         res.json({
-            deliveryId, supplier,
+            deliveryId, 
+            supplier,
             integrity: isConsistent ? "VERIFIED ✅" : "DISCREPANCY ❌",
-            details: { sql: sqlLogs.length, blockchain: bcData.length, expected }
+            details: { 
+                total_sql_logs: sqlLogs.length, 
+                total_blockchain_logs: bcData.length,
+                manipulations_found: discrepancies.length
+            },
+            discrepancies: discrepancies, // Listet genau auf, WO betrogen wurde
+            history: bcData // Lückenlose Historie für die Graphen im Frontend
         });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
