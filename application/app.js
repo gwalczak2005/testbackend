@@ -87,16 +87,19 @@ db.serialize(() => {
     )`);
 
     // 2. Mapping-Tabelle
-    // In db.serialize()
-    db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
+        db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
         sensor_id TEXT PRIMARY KEY,
         supplier_name TEXT,
         delivery_id TEXT,
         is_active INTEGER DEFAULT 1,
-        status TEXT DEFAULT 'IN_TRANSIT' -- Neu hinzugefügt
+        status TEXT DEFAULT 'IN_TRANSIT',
+        max_temp REAL DEFAULT 30.0,
+        min_temp REAL DEFAULT 2.0,
+        max_hum REAL DEFAULT 60.0,
+        min_hum REAL DEFAULT 20.0,
+        reading_count INTEGER DEFAULT 0
     )`);
 
-    // 3. User-Tabelle
     // 3. User-Tabelle & Default-Admin
     db.run(`CREATE TABLE IF NOT EXISTS api_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,48 +243,68 @@ app.get('/api/dev/debug-mappings', (req, res) => {
     });
 }); // <--- Diese Klammern haben gefehlt!
 
-// --- SENSOR DATA BUFFER (Diabere Schnittstelle für die Hardware) ---
+// --- SENSOR DATA BUFFER (Schnittstelle für ESP8266)
 app.post('/api/buffer', supplierAuth, (req, res) => {
-    const { id, temp, humidity } = req.body; // id ist hier die reine Hardware-ID, z.B. "01"
-    const supplierPrefix = req.user.owner;   // "Supplier_A" (aus dem API-Key extrahiert)
+    const { id, temp, humidity } = req.body;
     
-    // 1. Die eindeutige ID für die Datenbank-Suche zusammenbauen
+    // FIX: Wenn der Admin testet, darf er den Supplier via Header simulieren.
+    // Wenn später der echte ESP8266 funkt, wird hart der Owner aus dem API-Key erzwungen.
+    const supplierPrefix = (req.user.role === 'ADMIN' && req.headers['owner']) 
+                            ? req.headers['owner'] 
+                            : req.user.owner;
+    
     const uniqueId = `${supplierPrefix}_${id}`; 
 
-    const isAlarm = (temp > 30.0 || temp < 2.0) ? 1 : 0;
+    // ... (ab hier bleibt der Code exakt gleich mit db.get)
 
-    // 2. In SQL speichern (Wir loggen die uniqueId)
-    const sql = `INSERT INTO sensor_logs (sensor_id, temp, humidity, is_alarm) VALUES (?, ?, ?, ?)`;
-    
-    db.run(sql, [uniqueId, temp, humidity, isAlarm], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
+    // 1. Dynamisches Mapping inkl. Limits holen
+    db.get(`SELECT * FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1 AND status = 'IN_TRANSIT'`, 
+    [uniqueId], async (err, mapping) => {
+        if (err || !mapping) {
+            return res.status(403).json({ error: "Sensor inaktiv, Lieferung beendet oder nicht gefunden." });
+        }
 
-        const logId = this.lastID;
-        // 3. Eindeutige Blockchain-ID mit Zeitstempel gegen DB-Reset-Kollisionen
-        const bcAssetId = `LOG-${Date.now()}-${logId}`;
+        // 2. Dynamische Alarm-Prüfung anhand der lieferungsspezifischen Limits
+        let isAlarm = 0;
+        if (temp > mapping.max_temp || temp < mapping.min_temp || 
+            humidity > mapping.max_hum || humidity < mapping.min_hum) {
+            isAlarm = 1;
+        }
 
-        db.get(`SELECT * FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1`, [uniqueId], async (err, mapping) => {
-            if (mapping) {
-                if (logId % 2 === 0 || isAlarm === 1) {
-                    try {
-                        if (!contract) await initBlockchain();
-                        
-                        await contract.submitTransaction(
-                            'CreateAsset',
-                            bcAssetId,
-                            uniqueId, // Hier wird die Supplier-spezifische ID auf der Blockchain gespeichert
-                            temp.toString(),
-                            humidity.toString(),
-                            mapping.supplier_name,
-                            mapping.delivery_id
-                        );
-                        console.log(`✅ Blockchain-Sync: ${bcAssetId}`);
-                    } catch (bcErr) {
-                        console.error("❌ Blockchain-Fehler:", bcErr.message);
-                    }
+        // 3. Sensor-spezifischen Zähler erhöhen (Modulo-Bug Fix)
+        const newCount = mapping.reading_count + 1;
+        db.run(`UPDATE hardware_mappings SET reading_count = ? WHERE sensor_id = ?`, [newCount, uniqueId]);
+
+        // 4. In SQLite speichern
+        const sql = `INSERT INTO sensor_logs (sensor_id, temp, humidity, is_alarm) VALUES (?, ?, ?, ?)`;
+        db.run(sql, [uniqueId, temp, humidity, isAlarm], async function(err) {
+            if (err) return res.status(500).json({ error: err.message });
+
+            const logId = this.lastID;
+            const bcAssetId = `LOG-${Math.floor(Date.now() / 1000)}-${logId}`;
+
+            // 5. Intelligenter Blockchain-Sync (Nur jeder 2. Wert des spezifischen Sensors ODER bei Alarm)
+            if (newCount % 2 === 0 || isAlarm === 1) {
+                try {
+                    if (!contract) await initBlockchain();
+                    await contract.submitTransaction(
+                        'CreateAsset', bcAssetId, uniqueId, temp.toString(), humidity.toString(),
+                        mapping.supplier_name, mapping.delivery_id
+                    );
+                    console.log(`✅ Blockchain-Sync: ${bcAssetId} | Alarm: ${isAlarm === 1}`);
+                } catch (bcErr) {
+                    console.error("❌ Blockchain-Fehler:", bcErr.message);
+                    // HIER entsteht aktuell Datenverlust, wenn die Blockchain down ist.
+                    // Das lösen wir gleich in Schritt 2.
                 }
             }
-            res.json({ status: "Buffered", systemId: uniqueId, blockchainId: bcAssetId });
+            
+            res.json({ 
+                status: "Buffered", 
+                systemId: uniqueId, 
+                blockchainSync: (newCount % 2 === 0 || isAlarm === 1),
+                isAlarm: (isAlarm === 1)
+            });
         });
     });
 });
@@ -310,12 +333,26 @@ app.post('/api/admin/onboard', supplierAuth, (req, res) => {
 app.post('/api/admin/set-limit/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
     const { maxTemp, minTemp, maxHum, minHum } = req.body;
+    
     try {
         if (!contract) await initBlockchain();
+        
+        // 1. Unveränderlich im Smart Contract speichern
         await contract.submitTransaction('SetLimit', supplier, deliveryId, 
             maxTemp.toString(), minTemp.toString(), maxHum.toString(), minHum.toString());
-        res.json({ message: "Grenzwerte gespeichert." });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+        
+        // 2. Im lokalen SQLite-Cache spiegeln
+        const sqlUpdate = `UPDATE hardware_mappings 
+                           SET max_temp = ?, min_temp = ?, max_hum = ?, min_hum = ? 
+                           WHERE supplier_name = ? AND delivery_id = ?`;
+                           
+        db.run(sqlUpdate, [maxTemp, minTemp, maxHum, minHum, supplier, deliveryId], (err) => {
+            if (err) return res.status(500).json({ error: "Blockchain OK, lokaler DB-Fehler: " + err.message });
+            res.json({ message: "Grenzwerte erfolgreich auf Blockchain und im lokalen System gespeichert." });
+        });
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // 2.3 AUDIT
