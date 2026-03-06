@@ -76,13 +76,14 @@ const db = new sqlite3.Database(dbPath, (err) => {
 });
 
 db.serialize(() => {
-    // 1. Die Log-Tabelle (Rohdaten) - JETZT NUR NOCH EINMAL UND RICHTIG!
+    // 1. Die Log-Tabelle (Rohdaten) 
     db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sensor_id TEXT,
         temp REAL,
         humidity REAL,
         is_alarm INTEGER DEFAULT 0,
+        sync_status TEXT DEFAULT 'SYNCED',
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
@@ -293,9 +294,11 @@ app.post('/api/buffer', supplierAuth, (req, res) => {
                     );
                     console.log(`✅ Blockchain-Sync: ${bcAssetId} | Alarm: ${isAlarm === 1}`);
                 } catch (bcErr) {
-                    console.error("❌ Blockchain-Fehler:", bcErr.message);
-                    // HIER entsteht aktuell Datenverlust, wenn die Blockchain down ist.
-                    // Das lösen wir gleich in Schritt 2.
+                    console.error(`❌ Blockchain offline! Speichere in Puffer für späteren Sync: ${bcAssetId}`);
+                    // Status auf PENDING setzen, wenn Fabric nicht erreichbar ist
+                    db.run(`UPDATE sensor_logs SET sync_status = 'PENDING' WHERE id = ?`, [logId]);
+                    // Verbindung zurücksetzen
+                    contract = null;
                 }
             }
             
@@ -566,6 +569,50 @@ app.get('/api/supplier/alerts', supplierAuth, async (req, res) => {
     }
 });
 
+// ==========================================
+// 4. BACKGROUND WORKER (Offline-Resilienz)
+// ==========================================
+
+setInterval(() => {
+    const sql = `
+        SELECT s.*, h.supplier_name, h.delivery_id 
+        FROM sensor_logs s
+        JOIN hardware_mappings h ON s.sensor_id = h.sensor_id
+        WHERE s.sync_status = 'PENDING'
+    `;
+
+    db.all(sql, async (err, rows) => {
+        if (err || rows.length === 0) return;
+
+        console.log(`\n🔄 Offline-Resilienz: Versuche ${rows.length} PENDING-Datensätze nachzusynchronisieren...`);
+
+        for (const row of rows) {
+            try {
+                if (!contract) await initBlockchain();
+                
+                const bcAssetId = `LOG-${Math.floor(Date.now() / 1000)}-${row.id}`;
+                
+                await contract.submitTransaction(
+                    'CreateAsset', 
+                    bcAssetId, 
+                    row.sensor_id, 
+                    row.temp.toString(), 
+                    row.humidity.toString(),
+                    row.supplier_name, 
+                    row.delivery_id
+                );
+                
+                db.run(`UPDATE sensor_logs SET sync_status = 'SYNCED' WHERE id = ?`, [row.id]);
+                console.log(`✅ Nachträglicher Sync erfolgreich für SQL-ID: ${row.id}`);
+                
+            } catch (bcErr) {
+                console.error(`❌ Sync weiterhin fehlgeschlagen für SQL-ID ${row.id}.`);
+                contract = null; 
+                break; 
+            }
+        }
+    });
+}, 30000);
 
 // --- SERVER START ---
 app.listen(port, '0.0.0.0', () => {
