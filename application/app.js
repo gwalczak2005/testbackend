@@ -470,8 +470,7 @@ app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async
 // 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
 app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
-    const recipientName = "Großunternehmen AG"; // Festgelegt für Phase 1
-
+    const recipientName = req.body.recipientName || "Unbekannter Empfänger";
     try {
         if (!contract) await initBlockchain();
         // Blockchain-Beweis
@@ -486,19 +485,28 @@ app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async
 });
 
 // 2.5b FINAL CHECKOUT (Lieferant bestätigt Daten & schließt ab)
+// 2.5b FINAL CHECKOUT (Lieferant bestätigt Daten & schließt ab)
 app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
 
     try {
-        // Hier könnte man noch eine Blockchain-Transaktion 'FinalizeDelivery' hinzufügen, 
-        // falls im Smart Contract vorgesehen.
+        if (!contract) await initBlockchain();
         
-        // Jetzt erst wird die Lieferung für das "Live-System" unsichtbar (is_active = 0)
+        // 1. Unveränderliche Blockchain-Versiegelung aufrufen
+        await contract.submitTransaction('FinalizeDelivery', supplier, deliveryId);
+        
+        // 2. Erst nach Blockchain-Erfolg wird das Live-System (SQLite) deaktiviert
         db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId], (err) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ status: "Success", message: `Lieferung ${deliveryId} vollständig abgeschlossen und archiviert.` });
+            if (err) return res.status(500).json({ error: "Blockchain versiegelt, aber lokaler DB-Fehler: " + err.message });
+            
+            res.json({ 
+                status: "Success", 
+                message: `Lieferung ${deliveryId} vollständig auf der Blockchain versiegelt und archiviert.` 
+            });
         });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // 2.6 ALARM-DASHBOARD (Nur Warnungen abrufen)

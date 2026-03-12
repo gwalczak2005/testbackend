@@ -38,6 +38,18 @@ class AssetTransfer extends Contract {
     async CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId, originalTimestamp) {
         // 1. Composite Key für das Asset bauen
         const compositeKey = ctx.stub.createCompositeKey('asset', [supplierName, deliveryId, id]);
+        
+        // --- NEU: HARD-LOCK FÜR GESCHLOSSENE LIEFERUNGEN ---
+        const statusKey = ctx.stub.createCompositeKey('status', [supplierName, deliveryId]);
+        const statusBuffer = await ctx.stub.getState(statusKey);
+        
+        if (statusBuffer && statusBuffer.length > 0) {
+            const statusData = JSON.parse(statusBuffer.toString());
+            if (statusData.Status === 'CLOSED') {
+                throw new Error(`TRANSAKTION ABGELEHNT: Lieferung ${deliveryId} ist bereits versiegelt (CLOSED). Keine neuen Messwerte erlaubt.`);
+            }
+        }
+        // -------------------------------------------------------------
 
         // 2. DYNAMISCHES LIMIT ABHOLEN
         const limitKey = ctx.stub.createCompositeKey('limit', [supplierName, deliveryId]);
@@ -141,10 +153,27 @@ class AssetTransfer extends Contract {
         Status: 'DELIVERED',
         ConfirmedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString()
     };
-
+     
     await ctx.stub.putState(statusKey, Buffer.from(JSON.stringify(confirmation)));
     return JSON.stringify(confirmation);
-}
+
+    }
+
+    // Versiegelt eine Lieferung endgültig auf der Blockchain
+    async FinalizeDelivery(ctx, supplierName, deliveryId) {
+        const statusKey = ctx.stub.createCompositeKey('status', [supplierName, deliveryId]);
+        
+        const finalStatus = {
+            Supplier: supplierName,
+            DeliveryID: deliveryId,
+            Status: 'CLOSED',
+            ClosedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString()
+        };
+
+        // Überschreibt den bisherigen Status (z.B. DELIVERED) mit CLOSED
+        await ctx.stub.putState(statusKey, Buffer.from(JSON.stringify(finalStatus)));
+        return JSON.stringify(finalStatus);
+    }
 }
 
 module.exports = AssetTransfer;
