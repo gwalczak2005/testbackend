@@ -35,7 +35,7 @@ class AssetTransfer extends Contract {
     }
 
     // Erstellt einen neuen Messpunkt (Ist-Werte) und prüft gegen die Limits
-    async CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId) {
+    async CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId, originalTimestamp) {
         // 1. Composite Key für das Asset bauen
         const compositeKey = ctx.stub.createCompositeKey('asset', [supplierName, deliveryId, id]);
 
@@ -65,19 +65,20 @@ class AssetTransfer extends Contract {
 
         // 3. Das Asset-Objekt erstellen
         const asset = {
-            ID: id,
-            SensorID: sensorId,
-            Temperature: t, 
-            Humidity: h,
-            Supplier: supplierName,
-            DeliveryID: deliveryId,
-            IsWarning: isWarning,
-            AppliedLimits: appliedLimits,
-            Timestamp: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString(),
+                    ID: id,
+                    SensorID: sensorId,
+                    Temperature: t, 
+                    Humidity: h,
+                    Supplier: supplierName,
+                    DeliveryID: deliveryId,
+                    IsWarning: isWarning,
+                    AppliedLimits: appliedLimits,
+                    Timestamp: originalTimestamp, // <-- NEU: Die echte Zeit der Messung aus SQLite
+                    TxRecordedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString(), // Optional: Wann es wirklich in die Blockchain ging
         };
 
         // 4. Im Ledger speichern
-        await ctx.stub.putState(compositeKey, Buffer.from(stringify(asset)));
+        await ctx.stub.putState(compositeKey, Buffer.from(JSON.stringify(asset)));
         
         return JSON.stringify(asset);
     }

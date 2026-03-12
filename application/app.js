@@ -272,28 +272,32 @@ app.post('/api/buffer', supplierAuth, (req, res) => {
             isAlarm = 1;
         }
 
-        // 3. Sensor-spezifischen Zähler erhöhen (Modulo-Bug Fix)
+        // 3. Sensor-spezifischen Zähler erhöhen
         const newCount = mapping.reading_count + 1;
         db.run(`UPDATE hardware_mappings SET reading_count = ? WHERE sensor_id = ?`, [newCount, uniqueId]);
 
-        // 4. In SQLite speichern
-        const sql = `INSERT INTO sensor_logs (sensor_id, temp, humidity, is_alarm) VALUES (?, ?, ?, ?)`;
-        db.run(sql, [uniqueId, temp, humidity, isAlarm], async function(err) {
+        // NEU: Wir frieren die exakte Zeit der Messung ein
+        const measurementTime = new Date().toISOString();
+
+        // 4. In SQLite speichern (mit expliziter Zeit)
+        const sql = `INSERT INTO sensor_logs (sensor_id, temp, humidity, is_alarm, timestamp) VALUES (?, ?, ?, ?, ?)`;
+        db.run(sql, [uniqueId, temp, humidity, isAlarm, measurementTime], async function(err) {
             if (err) return res.status(500).json({ error: err.message });
 
             const logId = this.lastID;
             const bcAssetId = `LOG-${Math.floor(Date.now() / 1000)}-${logId}`;
 
-            // 5. Intelligenter Blockchain-Sync (Nur jeder 2. Wert des spezifischen Sensors ODER bei Alarm)
+            // 5. Intelligenter Blockchain-Sync
             if (newCount % 2 === 0 || isAlarm === 1) {
                 try {
                     if (!contract) await initBlockchain();
                     await contract.submitTransaction(
                         'CreateAsset', bcAssetId, uniqueId, temp.toString(), humidity.toString(),
-                        mapping.supplier_name, mapping.delivery_id
+                        mapping.supplier_name, mapping.delivery_id, measurementTime // <-- NEU: Zeit an BC übergeben
                     );
                     console.log(`✅ Blockchain-Sync: ${bcAssetId} | Alarm: ${isAlarm === 1}`);
                 } catch (bcErr) {
+                    // ... (Dein catch-Block mit PENDING bleibt gleich)
                     console.error(`❌ Blockchain offline! Speichere in Puffer für späteren Sync: ${bcAssetId}`);
                     // Status auf PENDING setzen, wenn Fabric nicht erreichbar ist
                     db.run(`UPDATE sensor_logs SET sync_status = 'PENDING' WHERE id = ?`, [logId]);
@@ -599,7 +603,8 @@ setInterval(() => {
                     row.temp.toString(), 
                     row.humidity.toString(),
                     row.supplier_name, 
-                    row.delivery_id
+                    row.delivery_id,
+                    row.timestamp // <-- NEU: Wir senden die historische SQLite-Zeit in die Vergangenheit!
                 );
                 
                 db.run(`UPDATE sensor_logs SET sync_status = 'SYNCED' WHERE id = ?`, [row.id]);
