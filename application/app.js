@@ -470,21 +470,29 @@ app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async
 // 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
 app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
-    const recipientName = req.body.recipientName || "Unbekannter Empfänger";
+    
+    // Dynamisch lesen. Falls req.body.recipientName leer ist, greift der Fallback.
+    const recipientName = req.body.recipientName || "Großunternehmen AG"; 
+
     try {
         if (!contract) await initBlockchain();
-        // Blockchain-Beweis
+        
+        // 1. Unveränderlicher Eintrag auf der Blockchain
         await contract.submitTransaction('ConfirmDelivery', supplier, deliveryId, recipientName);
         
-        // SQL-Update: Status ändern
+        // 2. SQL Status ändern, aber NOCH NICHT deaktivieren (das macht erst der Final Checkout)
         db.run(`UPDATE hardware_mappings SET status = 'DELIVERED' WHERE delivery_id = ?`, [deliveryId], (err) => {
             if (err) return res.status(500).json({ error: err.message });
-            res.json({ status: "Success", message: "Erhalt bestätigt. Status: DELIVERED" });
+            res.json({ 
+                status: "Success", 
+                message: `Erhalt von ${deliveryId} durch ${recipientName} bestätigt. Warte auf Checkout durch Lieferant.` 
+            });
         });
-    } catch (error) { res.status(500).json({ error: error.message }); }
+    } catch (error) { 
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
-// 2.5b FINAL CHECKOUT (Lieferant bestätigt Daten & schließt ab)
 // 2.5b FINAL CHECKOUT (Lieferant bestätigt Daten & schließt ab)
 app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
@@ -521,6 +529,23 @@ app.get('/api/admin/alerts', supplierAuth, async (req, res) => {
         const alerts = allData.filter(asset => asset.IsWarning === true);
         res.json({ count: alerts.length, alerts });
     } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// 2.7 Routenverlauf einsehen (von abgeschlossenen und laufenden Lieferungen)
+app.get('/api/admin/history/:supplier/:deliveryId', supplierAuth, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Nur für Admins reserviert." });
+
+    const { supplier, deliveryId } = req.params;
+    const uniqueId = `${supplier}_SENSOR-01`; // Beispielhaft, Mapping erfolgt über DB
+
+    db.get("SELECT * FROM hardware_mappings WHERE delivery_id = ? AND supplier_name = ?", [deliveryId, supplier], (err, mapping) => {
+        if (err || !mapping) return res.status(404).json({ error: "Lieferung nicht gefunden." });
+
+        db.all("SELECT temp, humidity, is_alarm, timestamp FROM sensor_logs WHERE sensor_id = ? ORDER BY timestamp ASC", 
+        [mapping.sensor_id], (err, logs) => {
+            res.json({ role: "ADMIN_VIEW", status: mapping.status, data: logs });
+        });
+    });
 });
 
 // ==========================================
@@ -579,6 +604,23 @@ app.get('/api/supplier/alerts', supplierAuth, async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+});
+
+// 2.7 Routenverlauf einsehen (von abgeschlossenen und laufenden Lieferungen)
+app.get('/api/admin/history/:supplier/:deliveryId', supplierAuth, (req, res) => {
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Nur für Admins reserviert." });
+
+    const { supplier, deliveryId } = req.params;
+    const uniqueId = `${supplier}_SENSOR-01`; // Beispielhaft, Mapping erfolgt über DB
+
+    db.get("SELECT * FROM hardware_mappings WHERE delivery_id = ? AND supplier_name = ?", [deliveryId, supplier], (err, mapping) => {
+        if (err || !mapping) return res.status(404).json({ error: "Lieferung nicht gefunden." });
+
+        db.all("SELECT temp, humidity, is_alarm, timestamp FROM sensor_logs WHERE sensor_id = ? ORDER BY timestamp ASC", 
+        [mapping.sensor_id], (err, logs) => {
+            res.json({ role: "ADMIN_VIEW", status: mapping.status, data: logs });
+        });
+    });
 });
 
 // ==========================================

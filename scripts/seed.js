@@ -21,11 +21,28 @@ async function runTest() {
         }, { headers: { 'x-api-key': ADMIN_KEY } });
         console.log(`✅ Limits synchronisiert.`);
 
-        // --- SCHRITT 3: NORMALE DATENÜBERTRAGUNG (Während der Fahrt) ---
-        console.log("\n📡 3. LKW ist unterwegs - Sensor funkt Daten...");
-        let res = await axios.post(`${BASE_URL}/api/buffer`, { id: "SENSOR-01", temp: 22.0, humidity: 50 }, 
-            { headers: { 'x-api-key': ADMIN_KEY, 'owner': 'Supplier_A' } });
-        console.log(`👉 Sensor funkt 22.0°C -> Status: ${res.data.status}`);
+        // --- SCHRITT 3: MESSREIHE SIMULIEREN (10 Werte) ---
+        console.log("\n📡 3. LKW ist unterwegs - Sensor funkt 10 Werte...");
+        
+        const testDaten = [
+            { t: 21.5, h: 48 }, { t: 22.0, h: 50 }, { t: 22.5, h: 52 }, // Normal
+            { t: 25.5, h: 55 }, // ALARM (über 24°C)
+            { t: 23.0, h: 50 }, { t: 22.8, h: 49 }, { t: 22.5, h: 48 }, 
+            { t: 22.0, h: 47 }, { t: 21.8, h: 46 }, { t: 21.5, h: 45 }
+        ];
+
+        for (let i = 0; i < testDaten.length; i++) {
+            const data = testDaten[i];
+            const res = await axios.post(`${BASE_URL}/api/buffer`, 
+                { id: "SENSOR-01", temp: data.t, humidity: data.h }, 
+                { headers: { 'x-api-key': ADMIN_KEY, 'owner': 'Supplier_A' } }
+            );
+            
+            console.log(`[Messung ${i+1}/10] Temp: ${data.t}°C -> Blockchain-Sync: ${res.data.blockchainSync} | Alarm: ${res.data.isAlarm}`);
+            
+            // Ganz kurze Pause (optional), damit die Zeitstempel minimal variieren
+            await new Promise(r => setTimeout(r, 500)); 
+        }
 
         // --- SCHRITT 4: EMPFANGSBESTÄTIGUNG (Ware am Ziel) ---
         console.log("\n🏢 4. Ware kommt an - Empfang wird bestätigt...");
