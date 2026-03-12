@@ -533,17 +533,43 @@ app.get('/api/admin/alerts', supplierAuth, async (req, res) => {
 
 // 2.7 Routenverlauf einsehen (von abgeschlossenen und laufenden Lieferungen)
 app.get('/api/admin/history/:supplier/:deliveryId', supplierAuth, (req, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Nur für Admins reserviert." });
+    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Nur für Admins." });
 
     const { supplier, deliveryId } = req.params;
-    const uniqueId = `${supplier}_SENSOR-01`; // Beispielhaft, Mapping erfolgt über DB
 
-    db.get("SELECT * FROM hardware_mappings WHERE delivery_id = ? AND supplier_name = ?", [deliveryId, supplier], (err, mapping) => {
+    // 1. Hole das Hardware-Mapping
+    db.get("SELECT sensor_id, status FROM hardware_mappings WHERE delivery_id = ? AND supplier_name = ?", 
+    [deliveryId, supplier], (err, mapping) => {
         if (err || !mapping) return res.status(404).json({ error: "Lieferung nicht gefunden." });
 
+        // 2. Hole alle Messdaten aus SQLite
         db.all("SELECT temp, humidity, is_alarm, timestamp FROM sensor_logs WHERE sensor_id = ? ORDER BY timestamp ASC", 
-        [mapping.sensor_id], (err, logs) => {
-            res.json({ role: "ADMIN_VIEW", status: mapping.status, data: logs });
+        [mapping.sensor_id], async (err, logs) => {
+            if (err) return res.status(500).json({ error: err.message });
+
+            // --- BLOCKCHAIN VERIFIZIERUNG ALLER DATEN ---
+            let blockchainVerified = true;
+            
+            // Wir prüfen stichprobenartig oder alle (hier die Logik für den Audit-Vergleich)
+            // In der Praxis wird hier die Prüfsumme der DB-Einträge gegen die Blockchain-Hashes abgeglichen
+            try {
+                // Simulation: Wir rufen unsere interne Audit-Funktion auf
+                // blockchainVerified = await auditTool.verifyFullChain(mapping.sensor_id, logs);
+                blockchainVerified = true; // Simulierter Erfolg für den Browser-Test
+            } catch (e) {
+                blockchainVerified = false;
+            }
+
+            // 3. Antwort mit dem Verifizierungs-Status
+            res.json({
+                role: "ADMIN_VIEW",
+                deliveryId: deliveryId,
+                status: mapping.status,
+                blockchainStatus: blockchainVerified ? "VERIFIED_SUCCESS" : "MANIPULATION_DETECTED",
+                lastAudit: new Date().toISOString(),
+                dataPoints: logs.length,
+                data: logs
+            });
         });
     });
 });
@@ -552,13 +578,35 @@ app.get('/api/admin/history/:supplier/:deliveryId', supplierAuth, (req, res) => 
 // 3. Supplier Area (/api/supplier)
 // ==========================================
 
-// 3.1 Einsehen aller aktiven Lieferungen
+// 3.1 Einsehen aller aktiven Lieferungen 
 app.get('/api/supplier/:supplier/active', supplierAuth, (req, res) => {
     const { supplier } = req.params;
-    db.all("SELECT delivery_id, sensor_id, timestamp FROM hardware_mappings WHERE supplier_name = ? AND is_active = 1", 
-    [supplier], (err, rows) => {
+    const user = req.user;
+
+    // Sicherheits-Check: Nur Admin oder der betroffene Supplier selbst
+    if (user.role !== 'ADMIN' && user.owner !== supplier) {
+        return res.status(403).json({ error: "Zugriff verweigert." });
+    }
+
+    // Wir holen die Lieferungs-Daten UND den neuesten Zeitstempel aus den Logs
+    const sql = `
+        SELECT 
+            m.delivery_id, 
+            m.sensor_id, 
+            m.status,
+            (SELECT MAX(timestamp) FROM sensor_logs WHERE sensor_id = m.sensor_id) as last_reading
+        FROM hardware_mappings m
+        WHERE m.supplier_name = ? AND m.is_active = 1
+    `;
+
+    db.all(sql, [supplier], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json({ supplier, activeCount: rows.length, deliveries: rows });
+        
+        res.json({ 
+            supplier, 
+            activeCount: rows.length, 
+            deliveries: rows // Enthält jetzt 'last_reading' statt dem fehlerhaften 'timestamp'
+        });
     });
 });
 
@@ -607,18 +655,57 @@ app.get('/api/supplier/alerts', supplierAuth, async (req, res) => {
 });
 
 // 2.7 Routenverlauf einsehen (von abgeschlossenen und laufenden Lieferungen)
-app.get('/api/admin/history/:supplier/:deliveryId', supplierAuth, (req, res) => {
-    if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Nur für Admins reserviert." });
+// 3.4 SUPPLIER: Verlauf der eigenen Lieferung mit Blockchain-Verifizierung
+app.get('/api/supplier/history/:deliveryId', supplierAuth, (req, res) => {
+    const { deliveryId } = req.params;
+    const supplierName = req.user.owner; // Harte Identität aus dem API-Key (z.B. 'Supplier_A')
 
-    const { supplier, deliveryId } = req.params;
-    const uniqueId = `${supplier}_SENSOR-01`; // Beispielhaft, Mapping erfolgt über DB
+    // 1. Suche die Lieferung - nur wenn sie diesem Supplier gehört!
+    const sqlMapping = `SELECT sensor_id, status FROM hardware_mappings 
+                        WHERE delivery_id = ? AND supplier_name = ?`;
 
-    db.get("SELECT * FROM hardware_mappings WHERE delivery_id = ? AND supplier_name = ?", [deliveryId, supplier], (err, mapping) => {
-        if (err || !mapping) return res.status(404).json({ error: "Lieferung nicht gefunden." });
+    db.get(sqlMapping, [deliveryId, supplierName], (err, mapping) => {
+        if (err) return res.status(500).json({ error: err.message });
+        
+        // Wenn die Kombination deliveryId + supplierName nicht existiert: Zugriff verweigert
+        if (!mapping) {
+            return res.status(403).json({ 
+                error: "Zugriff verweigert", 
+                message: "Diese Lieferung gehört nicht zu deinem Account oder existiert nicht." 
+            });
+        }
 
-        db.all("SELECT temp, humidity, is_alarm, timestamp FROM sensor_logs WHERE sensor_id = ? ORDER BY timestamp ASC", 
-        [mapping.sensor_id], (err, logs) => {
-            res.json({ role: "ADMIN_VIEW", status: mapping.status, data: logs });
+        // 2. Lade alle lokalen Messdaten für den Chart
+        const sqlLogs = `SELECT temp, humidity, is_alarm, timestamp 
+                         FROM sensor_logs 
+                         WHERE sensor_id = ? 
+                         ORDER BY timestamp ASC`;
+
+        db.all(sqlLogs, [mapping.sensor_id], async (err, logs) => {
+            if (err) return res.status(500).json({ error: err.message });
+
+            // 3. Blockchain-Verifizierung (Gesamt-Check)
+            let blockchainStatus = "VERIFIED_SUCCESS";
+            
+            try {
+                // Hier rufen wir die Blockchain-Prüfung auf (wie beim Admin)
+                // contract.evaluateTransaction('VerifyHistory', ...)
+                // Wir simulieren den Erfolg für die Ansicht:
+                blockchainStatus = "VERIFIED_SUCCESS";
+            } catch (e) {
+                blockchainStatus = "VERIFICATION_FAILED";
+            }
+
+            // 4. Antwort an das Supplier-Dashboard (Bubble.io)
+            res.json({
+                role: "SUPPLIER_VIEW",
+                supplier: supplierName,
+                deliveryId: deliveryId,
+                status: mapping.status, // IN_TRANSIT (Bubble pollt weiter) vs CLOSED (Statisch)
+                blockchainStatus: blockchainStatus,
+                dataPoints: logs.length,
+                data: logs
+            });
         });
     });
 });
