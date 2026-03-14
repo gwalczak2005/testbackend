@@ -29,99 +29,6 @@ const API_KEYS = {
     "KEY_SUPPLIER_A": { role: "SUPPLIER", owner: "Supplier_A" }
 };
 
-const supplierAuth = (req, res, next) => {
-    // 1. Key aus Header ODER URL-Parameter (ADMIN_KEY oder apiKey) extrahieren
-    const apiKey = req.headers['x-api-key'] || req.query.ADMIN_KEY || req.query.apiKey;
-    const requestedSupplier = req.params.supplier;
-
-    if (!apiKey) {
-        return res.status(401).json({ error: "Kein API-Key bereitgestellt." });
-    }
-
-    // 2. In der Datenbank nach dem User suchen
-    db.get(`SELECT * FROM api_users WHERE api_key = ?`, [apiKey], (err, user) => {
-        if (err || !user) {
-            return res.status(401).json({ error: "Ungültiger Key." });
-        }
-
-        // 3. Berechtigungs-Check
-        // Admin darf alles ODER Supplier darf nur auf seine eigenen Daten (req.params.supplier) zugreifen
-        const isAdmin = user.role === "ADMIN";
-        const isOwner = user.owner === requestedSupplier;
-
-        // Wenn kein spezifischer Supplier in der URL (z.B. bei /api/admin/alerts), 
-        // lassen wir Admins einfach durch.
-        if (isAdmin || (user.role === "SUPPLIER" && isOwner) || (!requestedSupplier && isAdmin)) {
-            req.user = user; // Wichtig für die Routen (req.user.owner/role)
-            return next();
-        }
-
-        // 4. Zugriff verweigert
-        console.warn(`🔒 ALARM: ${user.owner} wollte unbefugt auf [${requestedSupplier}] zugreifen!`);
-        return res.status(403).json({ 
-            error: "Zugriff verweigert", 
-            message: "Du darfst nur deine eigenen Daten sehen." 
-        });
-    });
-};
-
-// --- DATENBANK INITIALISIERUNG & SCHEMA ---
-const dbPath = path.resolve(__dirname, 'sensor_data.db');
-const db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-        console.error("Fehler beim Öffnen der DB:", err.message);
-    } else {
-        console.log("✅ SQLite-Datenbank verbunden.");
-    }
-});
-
-db.serialize(() => {
-    // 1. Die Log-Tabelle (Rohdaten) 
-    db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sensor_id TEXT,
-        temp REAL,
-        humidity REAL,
-        is_alarm INTEGER DEFAULT 0,
-        sync_status TEXT DEFAULT 'SYNCED',
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // 2. Mapping-Tabelle
-        db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
-        sensor_id TEXT PRIMARY KEY,
-        supplier_name TEXT,
-        delivery_id TEXT,
-        is_active INTEGER DEFAULT 1,
-        status TEXT DEFAULT 'IN_TRANSIT',
-        max_temp REAL DEFAULT 30.0,
-        min_temp REAL DEFAULT 2.0,
-        max_hum REAL DEFAULT 60.0,
-        min_hum REAL DEFAULT 20.0,
-        reading_count INTEGER DEFAULT 0
-    )`);
-
-    // 3. User-Tabelle & Default-Admin
-    db.run(`CREATE TABLE IF NOT EXISTS api_users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        api_key TEXT UNIQUE,
-        role TEXT,  -- 'ADMIN' oder 'SUPPLIER'
-        owner TEXT  -- Name des Großunternehmens oder des Lieferanten
-    )`, (err) => {
-        if (!err) {
-            // Legt den Master-Admin automatisch an, falls er noch nicht existiert
-            const insertAdmin = `INSERT OR IGNORE INTO api_users (api_key, role, owner) 
-                                VALUES (?, ?, ?)`;
-            db.run(insertAdmin, ['MASTER_ADMIN_2026', 'ADMIN', 'Großunternehmen AG'], (err) => {
-                if (err) console.error("❌ Fehler beim Anlegen des Default-Admins:", err.message);
-                else console.log("✅ Default-Admin 'MASTER_ADMIN_2026' ist einsatzbereit.");
-            });
-
-            // Optional: Einen Test-Supplier anlegen für das Supplier-Dashboard
-            db.run(insertAdmin, ['SUPPLIER_A_KEY', 'SUPPLIER', 'Supplier_A']);
-        }
-    });
-});
 
 // --- HYPERLEDGER FUNKTIONEN ---
 async function initBlockchain() {
@@ -167,55 +74,161 @@ async function sendToHyperledger(id, temp, humidity) {
             });
         });
     };
+}
+
+// Kapselung der Blockchain
+async function syncToBlockchain(logId, sensorData, mapping) {
+    // 1. Daten extrahieren
+    const { uniqueId, temp, humidity, lat, lon, measurementTime } = sensorData;
+    const { supplier_name, delivery_id } = mapping;
+
+    // 2. Asset-ID generieren
+    const bcAssetId = `LOG-${Math.floor(Date.now() / 1000)}-${logId}`;
 
     try {
-        const mapping = await getMapping();
-
-        // --- DER GATEKEEPER-CHECK ---
-        if (!mapping) {
-            console.error(`\n⚠️  BLOCKCHAIN-STOPP: Sensor [${id}] ist NICHT AKTIV für eine Lieferung registriert!`);
-            console.error(`👉 Grund: Entweder nie onboarded oder bereits ge-offboarded.`);
-            return; // Hier stoppt die Funktion komplett. Nichts geht an die Blockchain.
-        }
-
-        // Wenn wir hier ankommen, haben wir ein gültiges mapping!
-        const { supplier_name, delivery_id } = mapping;
-        const timestampID = `${id}_${Date.now()}`;
-        
-        console.log(`\n🔗 BLOCKCHAIN: Sende validierte Daten für ${supplier_name} (${delivery_id})...`);
-
-        // 2. BLOCKCHAIN GATEWAY CHECK
+        // 3. Blockchain-Verbindung prüfen
         if (!contract) {
-            console.log("🔄 Verbindung zum Gateway wird neu aufgebaut...");
+            console.log("🔗 Initialisiere Blockchain-Verbindung für Sync...");
             await initBlockchain();
             if (!contract) {
-                console.error("❌ Blockchain-Verbindung fehlgeschlagen. Daten werden verworfen.");
-                return;
+                throw new Error("Blockchain-Gateway konnte nicht initialisiert werden.");
             }
         }
 
-        // 3. TRANSAKTION AN DIE BLOCKCHAIN ÜBERMITTELN
+        console.log(`\n🔗 BLOCKCHAIN: Sende validierte Daten für ${supplier_name} (${delivery_id})...`);
+
+        // 4. Transaktion an Hyperledger Fabric übermitteln (10 Parameter)
         await contract.submitTransaction(
             'CreateAsset', 
-            timestampID, 
-            id, 
+            bcAssetId, 
+            uniqueId, 
             temp.toString(), 
-            humidity.toString(), 
+            humidity.toString(),
             supplier_name, 
-            delivery_id
+            delivery_id, 
+            measurementTime, 
+            lat ? lat.toString() : "0.0", 
+            lon ? lon.toString() : "0.0"
         );
         
-        console.log(`✅ Blockchain-Eintrag für ${delivery_id} erfolgreich gespeichert.`);
+        console.log(`✅ Blockchain-Sync erfolgreich: ${bcAssetId}`);
+        return { success: true, assetId: bcAssetId };
 
     } catch (error) {
-        console.error("❌ Blockchain-Fehler in sendToHyperledger:", error.message);
-        // Bei Verbindungsabbrüchen (gRPC 14) setzen wir den contract zurück
-        if (error.message.includes('14') || error.message.includes('closed')) {
+        console.error(`❌ Blockchain-Sync fehlgeschlagen für ${bcAssetId}:`, error.message);
+        
+        // Bei Verbindungsfehlern contract zurücksetzen
+        if (error.message.includes('14') || error.message.includes('closed') || error.message.includes('unavailable')) {
             contract = null;
         }
-    }
+        
+        return { success: false, assetId: bcAssetId };
+    } // <-- Schließt den catch-Block
 }
 
+// Authentifikation-Middleware
+const supplierAuth = (req, res, next) => {
+    const apiKey = req.headers['x-api-key'] || req.query.apiKey;
+    const requestedSupplier = req.params.supplier;
+
+    if (!apiKey) {
+        return res.status(401).json({ error: "Kein API-Key bereitgestellt." });
+    }
+
+    db.get(`SELECT * FROM api_users WHERE api_key = ?`, [apiKey], (err, user) => {
+        if (err || !user) {
+            return res.status(401).json({ error: "Ungültiger Key." });
+        }
+
+        // --- VERBESSERTER CHECK ---
+        const isAdmin = user.role === "ADMIN";
+
+        // 1. Wenn ein Admin anklopft: Sofort durchlassen
+        if (isAdmin) {
+            req.user = user;
+            return next();
+        }
+
+        // 2. Wenn ein Supplier anklopft:
+        if (user.role === "SUPPLIER") {
+            // A) Fall: In der URL steht ein Name (z.B. /api/history/Lieferant1)
+            //    Dann MUSS dieser Name exakt dem Owner des Keys entsprechen.
+            if (requestedSupplier && requestedSupplier !== user.owner) {
+                console.warn(`🔒 ALARM: ${user.owner} wollte auf fremde Daten von [${requestedSupplier}] zugreifen!`);
+                return res.status(403).json({ error: "Zugriff verweigert", message: "Du darfst nur deine eigenen Daten sehen." });
+            }
+
+            // B) Fall: Keine URL-Parameter (z.B. /api/supplier/onboard)
+            //    Hier lassen wir ihn durch, da die Route selbst (z.B. Onboarding) 
+            //    im nächsten Schritt sowieso user.owner zur Erstellung nutzt.
+            req.user = user;
+            return next();
+        }
+
+        // 3. Fallback: Unbekannte Rolle
+        return res.status(403).json({ error: "Zugriff verweigert", message: "Rolle nicht autorisiert." });
+    });
+};
+
+// --- DATENBANK INITIALISIERUNG & SCHEMA ---
+const dbPath = path.resolve(__dirname, 'sensor_data.db');
+const db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+        console.error("Fehler beim Öffnen der DB:", err.message);
+    } else {
+        console.log("✅ SQLite-Datenbank verbunden.");
+    }
+});
+
+db.serialize(() => {
+    // 1. Die Log-Tabelle (Rohdaten) 
+    db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sensor_id TEXT,
+        temp REAL,
+        humidity REAL,
+        lat REAL,           -- NEU: Breitengrad
+        lon REAL,           -- NEU: Längengrad
+        is_alarm INTEGER DEFAULT 0,
+        sync_status TEXT DEFAULT 'SYNCED',
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    // 2. Mapping-Tabelle
+        db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
+        sensor_id TEXT PRIMARY KEY,
+        supplier_name TEXT,
+        delivery_id TEXT,
+        is_active INTEGER DEFAULT 1,
+        status TEXT DEFAULT 'IN_TRANSIT',
+        max_temp REAL DEFAULT 30.0,
+        min_temp REAL DEFAULT 2.0,
+        max_hum REAL DEFAULT 60.0,
+        min_hum REAL DEFAULT 20.0,
+        reading_count INTEGER DEFAULT 0
+    )`);
+
+    // 3. User-Tabelle & Default-Admin
+    db.run(`CREATE TABLE IF NOT EXISTS api_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        api_key TEXT UNIQUE,
+        role TEXT,  -- 'ADMIN' oder 'SUPPLIER'
+        owner TEXT  -- Name des Großunternehmens oder des Lieferanten
+    )`, (err) => {
+        if (!err) {
+            // Legt den Master-Admin automatisch an, falls er noch nicht existiert
+            const insertAdmin = `INSERT OR IGNORE INTO api_users (api_key, role, owner) 
+                                VALUES (?, ?, ?)`;
+            db.run(insertAdmin, ['MASTER_ADMIN_2026', 'ADMIN', 'Großunternehmen AG'], (err) => {
+                if (err) console.error("❌ Fehler beim Anlegen des Default-Admins:", err.message);
+                else console.log("✅ Default-Admin 'MASTER_ADMIN_2026' ist einsatzbereit.");
+            });
+
+            // Optional: Einen Test-Supplier anlegen für das Supplier-Dashboard
+            db.run(insertAdmin, ['SUPPLIER_A_KEY', 'SUPPLIER', 'Supplier_A']);
+        }
+    });
+});
 
 //API-ROUTES
 
@@ -246,70 +259,58 @@ app.get('/api/dev/debug-mappings', (req, res) => {
 
 // --- SENSOR DATA BUFFER (Schnittstelle für ESP8266)
 app.post('/api/buffer', supplierAuth, (req, res) => {
-    const { id, temp, humidity } = req.body;
+    const { id, temp, humidity, lat, lon } = req.body;
     
-    // FIX: Wenn der Admin testet, darf er den Supplier via Header simulieren.
-    // Wenn später der echte ESP8266 funkt, wird hart der Owner aus dem API-Key erzwungen.
+    // Ermittlung der Identität (Admin-Override oder Supplier-Eigendaten)
     const supplierPrefix = (req.user.role === 'ADMIN' && req.headers['owner']) 
                             ? req.headers['owner'] 
                             : req.user.owner;
     
     const uniqueId = `${supplierPrefix}_${id}`; 
 
-    // ... (ab hier bleibt der Code exakt gleich mit db.get)
-
-    // 1. Dynamisches Mapping inkl. Limits holen
+    // 1. Validierung: Existiert die Lieferung und ist sie aktiv?
     db.get(`SELECT * FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1 AND status = 'IN_TRANSIT'`, 
     [uniqueId], async (err, mapping) => {
         if (err || !mapping) {
-            return res.status(403).json({ error: "Sensor inaktiv, Lieferung beendet oder nicht gefunden." });
+            return res.status(403).json({ error: "Sensor inaktiv oder keine laufende Lieferung gefunden." });
         }
 
-        // 2. Dynamische Alarm-Prüfung anhand der lieferungsspezifischen Limits
-        let isAlarm = 0;
-        if (temp > mapping.max_temp || temp < mapping.min_temp || 
-            humidity > mapping.max_hum || humidity < mapping.min_hum) {
-            isAlarm = 1;
-        }
+        // 2. Business-Logik: Alarmprüfung gegen die im Onboarding gesetzten Limits
+        const isAlarm = (temp > mapping.max_temp || temp < mapping.min_temp || 
+                         humidity > mapping.max_hum || humidity < mapping.min_hum) ? 1 : 0;
 
-        // 3. Sensor-spezifischen Zähler erhöhen
+        // 3. Status-Update: Reading Count für Modulo-Sync erhöhen
         const newCount = mapping.reading_count + 1;
         db.run(`UPDATE hardware_mappings SET reading_count = ? WHERE sensor_id = ?`, [newCount, uniqueId]);
 
-        // NEU: Wir frieren die exakte Zeit der Messung ein
         const measurementTime = new Date().toISOString();
 
-        // 4. In SQLite speichern (mit expliziter Zeit)
-        const sql = `INSERT INTO sensor_logs (sensor_id, temp, humidity, is_alarm, timestamp) VALUES (?, ?, ?, ?, ?)`;
-        db.run(sql, [uniqueId, temp, humidity, isAlarm, measurementTime], async function(err) {
-            if (err) return res.status(500).json({ error: err.message });
+        // 4. Persistierung in der lokalen SQLite-Datenbank (Audit-Log)
+        const sqlInsert = `INSERT INTO sensor_logs (sensor_id, temp, humidity, lat, lon, is_alarm, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+        db.run(sqlInsert, [uniqueId, temp, humidity, lat, lon, isAlarm, measurementTime], async function(err) {
+            if (err) return res.status(500).json({ error: "Lokaler DB-Fehler: " + err.message });
 
             const logId = this.lastID;
-            const bcAssetId = `LOG-${Math.floor(Date.now() / 1000)}-${logId}`;
+            // Regel: Jeder 2. Wert ODER bei Grenzwertüberschreitung
+            const shouldSync = (newCount % 2 === 0 || isAlarm === 1);
 
-            // 5. Intelligenter Blockchain-Sync
-            if (newCount % 2 === 0 || isAlarm === 1) {
-                try {
-                    if (!contract) await initBlockchain();
-                    await contract.submitTransaction(
-                        'CreateAsset', bcAssetId, uniqueId, temp.toString(), humidity.toString(),
-                        mapping.supplier_name, mapping.delivery_id, measurementTime // <-- NEU: Zeit an BC übergeben
-                    );
-                    console.log(`✅ Blockchain-Sync: ${bcAssetId} | Alarm: ${isAlarm === 1}`);
-                } catch (bcErr) {
-                    // ... (Dein catch-Block mit PENDING bleibt gleich)
-                    console.error(`❌ Blockchain offline! Speichere in Puffer für späteren Sync: ${bcAssetId}`);
-                    // Status auf PENDING setzen, wenn Fabric nicht erreichbar ist
+            // 5. Übergabe an den Blockchain-Service (Kapselung gewahrt)
+            if (shouldSync) {
+                const syncResult = await syncToBlockchain(logId, { 
+                    uniqueId, temp, humidity, lat, lon, measurementTime 
+                }, mapping);
+
+                // Falls Blockchain offline, lokal als PENDING markieren
+                if (!syncResult.success) {
                     db.run(`UPDATE sensor_logs SET sync_status = 'PENDING' WHERE id = ?`, [logId]);
-                    // Verbindung zurücksetzen
-                    contract = null;
                 }
             }
             
+            // 6. Antwort an den ESP8266 (Isoliert von Blockchain-Details)
             res.json({ 
                 status: "Buffered", 
                 systemId: uniqueId, 
-                blockchainSync: (newCount % 2 === 0 || isAlarm === 1),
+                blockchainSync: shouldSync,
                 isAlarm: (isAlarm === 1)
             });
         });
@@ -654,7 +655,6 @@ app.get('/api/supplier/alerts', supplierAuth, async (req, res) => {
     }
 });
 
-// 2.7 Routenverlauf einsehen (von abgeschlossenen und laufenden Lieferungen)
 // 3.4 SUPPLIER: Verlauf der eigenen Lieferung mit Blockchain-Verifizierung
 app.get('/api/supplier/history/:deliveryId', supplierAuth, (req, res) => {
     const { deliveryId } = req.params;
@@ -708,6 +708,86 @@ app.get('/api/supplier/history/:deliveryId', supplierAuth, (req, res) => {
             });
         });
     });
+});
+
+//3.5 Supplier onboardet seine Lieferung selbst
+app.post('/api/supplier/onboard', supplierAuth, (req, res) => {
+    const supplierName = req.user.owner; // Der Name wird sicher aus dem API-Key gezogen
+    const { hardwareId, deliveryId } = req.body;
+        
+    if (!supplierName) {
+        return res.status(403).json({ error: "Zugriff verweigert", message: "Kein Owner im Key gefunden." });
+    }
+
+    const uniqueSensorId = `${supplierName}_${hardwareId}`;
+
+    const sql = `INSERT INTO hardware_mappings (sensor_id, supplier_name, delivery_id, is_active, status) 
+                 VALUES (?, ?, ?, 1, 'IN_TRANSIT')`;
+
+    db.run(sql, [uniqueSensorId, supplierName, deliveryId], (err) => {
+        if (err) return res.status(500).json({ error: "Sensor bereits belegt oder Fehler: " + err.message });
+        res.json({ status: "Success", message: "Lieferung durch Supplier onboarded", systemId: uniqueSensorId });
+    });
+});
+
+// 3.6 Supplier legt Grenzwerte fest
+app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) => {
+    const { deliveryId } = req.params;
+    const { maxTemp, minTemp, maxHum, minHum } = req.body;
+    
+    // Identität wird sicher aus dem API-Key (Header) extrahiert
+    const supplier = req.user.owner; 
+
+    console.log(`\n--- Limit-Setzung gestartet für: ${deliveryId} (${supplier}) ---`);
+
+    try {
+        // 1. Blockchain-Verbindung sicherstellen
+        if (!contract) {
+            console.log("🔗 Initialisiere Blockchain-Verbindung...");
+            await initBlockchain();
+        }
+
+        // 2. Unveränderlich im Smart Contract speichern
+        console.log("📡 Sende Transaktion 'SetLimit' an Hyperledger Fabric...");
+        await contract.submitTransaction(
+            'SetLimit', 
+            supplier, 
+            deliveryId, 
+            maxTemp.toString(), 
+            minTemp.toString(), 
+            maxHum.toString(), 
+            minHum.toString()
+        );
+        console.log("✅ Blockchain-Antwort erhalten: Limits versiegelt.");
+
+        // 3. Im lokalen SQLite-Cache spiegeln
+        const sqlUpdate = `UPDATE hardware_mappings 
+                           SET max_temp = ?, min_temp = ?, max_hum = ?, min_hum = ? 
+                           WHERE supplier_name = ? AND delivery_id = ? AND is_active = 1`;
+                           
+        db.run(sqlUpdate, [maxTemp, minTemp, maxHum, minHum, supplier, deliveryId], function(err) {
+            if (err) {
+                console.error("❌ Lokaler DB-Fehler nach Blockchain-Sync:", err.message);
+                return res.status(500).json({ error: "Blockchain OK, lokaler DB-Fehler: " + err.message });
+            }
+            
+            if (this.changes === 0) {
+                console.warn("⚠️ Keine Datenbank-Änderung: Lieferung existiert nicht oder ist inaktiv.");
+                return res.status(404).json({ error: "Lieferung nicht gefunden oder bereits abgeschlossen." });
+            }
+
+            console.log("💾 Lokale Datenbank aktualisiert.");
+            res.json({ 
+                status: "Success",
+                message: `Grenzwerte für Lieferung ${deliveryId} wurden durch ${supplier} versiegelt.`,
+                limits: { maxTemp, minTemp, maxHum, minHum }
+            });
+        });
+
+    } catch (error) { 
+        console.error("❌ Kritischer Fehler bei SetLimit:", error.message);
+        res.status(500).json({ error: error.message }); 
+    }
 });
 
 // ==========================================

@@ -35,58 +35,58 @@ class AssetTransfer extends Contract {
     }
 
     // Erstellt einen neuen Messpunkt (Ist-Werte) und prüft gegen die Limits
-    async CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId, originalTimestamp) {
+    async CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId, originalTimestamp, lat, lon) {
         // 1. Composite Key für das Asset bauen
         const compositeKey = ctx.stub.createCompositeKey('asset', [supplierName, deliveryId, id]);
         
-        // --- NEU: HARD-LOCK FÜR GESCHLOSSENE LIEFERUNGEN ---
+        // --- HARD-LOCK FÜR GESCHLOSSENE LIEFERUNGEN ---
         const statusKey = ctx.stub.createCompositeKey('status', [supplierName, deliveryId]);
         const statusBuffer = await ctx.stub.getState(statusKey);
         
         if (statusBuffer && statusBuffer.length > 0) {
             const statusData = JSON.parse(statusBuffer.toString());
             if (statusData.Status === 'CLOSED') {
-                throw new Error(`TRANSAKTION ABGELEHNT: Lieferung ${deliveryId} ist bereits versiegelt (CLOSED). Keine neuen Messwerte erlaubt.`);
+                throw new Error(`TRANSAKTION ABGELEHNT: Lieferung ${deliveryId} ist bereits versiegelt (CLOSED).`);
             }
         }
-        // -------------------------------------------------------------
 
-        // 2. DYNAMISCHES LIMIT ABHOLEN
+        // 2. DATEN PARSEN & LIMITS PRÜFEN
+        const t = parseFloat(temperature);
+        const h = parseFloat(humidity);
+        const latitude = parseFloat(lat) || 0.0; // Fallback auf 0.0 falls leer
+        const longitude = parseFloat(lon) || 0.0;
+
         const limitKey = ctx.stub.createCompositeKey('limit', [supplierName, deliveryId]);
         const limitBuffer = await ctx.stub.getState(limitKey);
         
         let isWarning = false;
         let appliedLimits = "None"; 
 
-        const t = parseFloat(temperature);
-        const h = parseFloat(humidity);
-
-        // Prüfung gegen geladene Limits
         if (limitBuffer && limitBuffer.length > 0) {
             const limitData = JSON.parse(limitBuffer.toString());
-            
             if (t > limitData.MaxTemp || t < limitData.MinTemp || 
                 h > limitData.MaxHum || h < limitData.MinHum) {
                 isWarning = true;
             }
             appliedLimits = JSON.stringify(limitData);
         } else {
-            // Fallback: Wenn kein Limit gesetzt wurde, prüfe gegen Standardwert (30 Grad)
             if (t > 30.0) isWarning = true;
         }
 
-        // 3. Das Asset-Objekt erstellen
+        // 3. Das Asset-Objekt erstellen (inklusive GPS)
         const asset = {
-                    ID: id,
-                    SensorID: sensorId,
-                    Temperature: t, 
-                    Humidity: h,
-                    Supplier: supplierName,
-                    DeliveryID: deliveryId,
-                    IsWarning: isWarning,
-                    AppliedLimits: appliedLimits,
-                    Timestamp: originalTimestamp, // <-- NEU: Die echte Zeit der Messung aus SQLite
-                    TxRecordedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString(), // Optional: Wann es wirklich in die Blockchain ging
+            ID: id,
+            SensorID: sensorId,
+            Temperature: t, 
+            Humidity: h,
+            Latitude: latitude,  // <-- NEU
+            Longitude: longitude, // <-- NEU
+            Supplier: supplierName,
+            DeliveryID: deliveryId,
+            IsWarning: isWarning,
+            AppliedLimits: appliedLimits,
+            Timestamp: originalTimestamp,
+            TxRecordedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString(),
         };
 
         // 4. Im Ledger speichern

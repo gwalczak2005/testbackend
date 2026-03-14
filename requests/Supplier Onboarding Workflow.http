@@ -1,0 +1,61 @@
+### =================================================================
+### SUPPLIER ONBOARDING WORKFLOW (Sicht des Lieferanten)
+### =================================================================
+
+# 1. SCHRITT: Hardware registrieren und Lieferung starten
+# Der Lieferant verknüpft seinen ESP8266 mit einer Liefernummer.
+# WICHTIG: Der Name "Lieferant1" wird automatisch aus dem API-Key gezogen.
+
+POST http://localhost:3000/api/supplier/onboard
+Content-Type: application/json
+x-api-key: SUPPLIER_A_KEY
+
+{
+    "hardwareId": "ESP_001",
+    "deliveryId": "SHIP-2026-001"
+}
+
+###
+
+# 2. SCHRITT: Grenzwerte für die Blockchain festlegen
+# Der Lieferant definiert die zulässigen Transportbedingungen.
+# Diese werden unveränderlich im Smart Contract (Hyperledger) gespeichert.
+
+POST http://localhost:3000/api/supplier/set-limit/SHIP-2026-001
+Content-Type: application/json
+x-api-key: SUPPLIER_A_KEY
+
+{
+    "maxTemp": 24.0,
+    "minTemp": 2.0,
+    "maxHum": 60.0,
+    "minHum": 20.0
+}
+
+###
+
+# 3. SCHRITT: Ersten Messwert simulieren (Gateway-Test)
+# Dies entspricht dem, was der ESP8266 alle 30 Sekunden sendet.
+# Inklusive GPS-Daten für das Tracking.
+
+POST http://localhost:3000/api/buffer
+Content-Type: application/json
+x-api-key: SUPPLIER_A_KEY
+owner: Lieferant1
+
+{
+    "id": "ESP_001",
+    "temp": 22.1,
+    "humidity": 48.5,
+    "lat": 51.3072,
+    "lon": 9.4723
+}
+
+###
+
+# 4. SCHRITT: Status-Check (Eigene Historie einsehen)
+# Der Lieferant prüft, ob seine Daten korrekt erfasst wurden 
+# und ob die Blockchain die Integrität bestätigt.
+
+GET http://localhost:3000/api/supplier/history/SHIP-2026-001
+x-api-key: SUPPLIER_A_KEY
