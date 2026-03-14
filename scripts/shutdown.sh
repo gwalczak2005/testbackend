@@ -37,4 +37,4 @@ fi
 #echo "Beende eventuell laufende Node.js Prozesse..."
 #pkill -9 node 2>/dev/null
 
-echo "Netzwerk vollständig heruntergefahren"
+echo "Netzwerk heruntergefahren"
