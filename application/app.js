@@ -575,6 +575,72 @@ app.get('/api/admin/history/:supplier/:deliveryId', supplierAuth, (req, res) => 
     });
 });
 
+// 2.8 Registrieren eines neuen Lieferanten im System => legt einen lokalen Account an und registriert die Identität auf der Blockchain.
+app.post('/api/admin/onboard-supplier', adminAuth, async (req, res) => {
+    const { supplierName, password, apiKey } = req.body;
+
+    // 1. Validierung der Eingabedaten
+    if (!supplierName || !apiKey || !password) {
+        return res.status(400).json({ 
+            error: "Name, Passwort und API-Key sind erforderlich." 
+        });
+    }
+
+    // 2. Lokale Registrierung in der SQLite (api_users Tabelle)
+    // Wir speichern hier die technischen Zugangsdaten, die NICHT auf die Blockchain gehören.
+    const sql = `INSERT INTO api_users (username, password, role, owner, api_key) VALUES (?, ?, ?, ?, ?)`;
+    const username = supplierName.toLowerCase();
+
+    db.run(sql, [username, password, 'SUPPLIER', supplierName, apiKey], async function(err) {
+        if (err) {
+            return res.status(500).json({ 
+                error: "Fehler beim Anlegen des Lieferanten in der DB: " + err.message 
+            });
+        }
+
+        console.log(`[GATEWAY] Lokaler Account erstellt für: ${supplierName}`);
+
+        // 3. Blockchain-Registrierung (Die "digitale Urkunde")
+        // Wir nutzen einen Try-Catch Block, damit das Gateway stabil bleibt, 
+        // auch wenn der Chaincode-Aufruf fehlschlägt.
+        try {
+            console.log(`🔗 BLOCKCHAIN: Registriere Lieferant '${supplierName}' im Ledger...`);
+            
+            // Aufruf der neuen Chaincode-Funktion
+            // Wir übergeben Metadaten, aber keine Passwörter!
+            await contract.submitTransaction(
+                'RegisterSupplier', 
+                supplierName, 
+                "Zertifizierter Logistikpartner (Neuaufnahme 2026)"
+            );
+
+            // 4. Erfolg: Antwort an den Admin
+            res.status(201).json({
+                status: "Success",
+                message: `Lieferant '${supplierName}' wurde lokal und auf der Blockchain registriert.`,
+                data: {
+                    username: username,
+                    blockchainId: `SUPPLIER_${supplierName}`,
+                    role: "SUPPLIER"
+                }
+            });
+
+        } catch (bcError) {
+            // Im Fehlerfall markieren wir den User lokal als "nicht synchronisiert" 
+            // oder geben eine entsprechende Warnung zurück.
+            console.error("❌ Blockchain-Fehler bei Onboarding:", bcError.message);
+            
+            res.status(201).json({
+                status: "Partial Success",
+                message: `Lieferant lokal angelegt, aber Blockchain-Eintrag fehlgeschlagen.`,
+                error: bcError.message,
+                supplier: supplierName
+            });
+        }
+    });
+});
+
+
 // ==========================================
 // 3. Supplier Area (/api/supplier)
 // ==========================================

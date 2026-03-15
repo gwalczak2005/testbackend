@@ -114,7 +114,7 @@ class AssetTransfer extends Contract {
         return await this._getAllResults(iterator);
     }
 
-// Interne Hilfsfunktion für die Iteratoren
+    // Interne Hilfsfunktion für die Iteratoren
     async _getAllResults(iterator) {
         const allResults = [];
         let res = await iterator.next();
@@ -143,6 +143,7 @@ class AssetTransfer extends Contract {
         return JSON.stringify(allResults);
     }
 
+    //Proof-of-Delivery
     async ConfirmDelivery(ctx, supplierName, deliveryId, recipientName) {
     const statusKey = ctx.stub.createCompositeKey('status', [supplierName, deliveryId]);
     
@@ -173,6 +174,27 @@ class AssetTransfer extends Contract {
         // Überschreibt den bisherigen Status (z.B. DELIVERED) mit CLOSED
         await ctx.stub.putState(statusKey, Buffer.from(JSON.stringify(finalStatus)));
         return JSON.stringify(finalStatus);
+    }
+
+    //Registrierung eines neuen Suppliers im Framework
+    async RegisterSupplier(ctx, supplierName, organizationDetails) {
+    const exists = await this.AssetExists(ctx, `SUPPLIER_${supplierName}`);
+    if (exists) {
+        throw new Error(`Der Lieferant ${supplierName} ist bereits auf der Blockchain registriert.`);
+    }
+
+    const supplierAsset = {
+        ID: `SUPPLIER_${supplierName}`,
+        Type: 'SUPPLIER',
+        Name: supplierName,
+        OrgDetails: organizationDetails,
+        Status: 'ACTIVE',
+        RegisteredAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString()
+    };
+
+    // Speichern im World State der Blockchain
+    await ctx.stub.putState(supplierAsset.ID, Buffer.from(JSON.stringify(supplierAsset)));
+    return JSON.stringify(supplierAsset);
     }
 }
 
