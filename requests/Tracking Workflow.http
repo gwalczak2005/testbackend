@@ -1,0 +1,56 @@
+### =================================================================
+### ZWISCHENTEST: ONBOARDING & LIMIT-SETZUNG
+### =================================================================
+
+@baseUrl = http://192.168.1.208:3000
+@adminKey = DEIN_ADMIN_MASTER_KEY
+@newSupplierKey = SUPPLIER_B_TOKEN_99
+@newSupplierName = Lieferant_B
+@newSupplierPass = start123
+@deliveryId = SHIP-2026-B-TEST
+@sensorHardwareId = ESP_99
+
+### -----------------------------------------------------------------
+### SCHRITT 1: Lieferant im System aufnehmen (ADMIN-AKTION)
+### -----------------------------------------------------------------
+# Erstellt den Account in SQLite und das SUPPLIER-Asset auf der Blockchain
+### SCHRITT 1: Lieferant im System aufnehmen
+POST {{baseUrl}}/api/admin/onboard-supplier
+x-api-key: {{adminKey}}
+Content-Type: application/json
+
+{
+    "supplierName": "{{newSupplierName}}",
+    "password": "{{newSupplierPass}}",
+    "apiKey": "{{newSupplierKey}}"
+}
+
+### -----------------------------------------------------------------
+### SCHRITT 2: Lieferung registrieren (SUPPLIER-AKTION)
+### -----------------------------------------------------------------
+# Der Lieferant nutzt SEINEN neuen Key.
+# Status in DB wird 'PENDING_LIMITS'. Blockchain initialisiert die Lieferung.
+POST {{baseUrl}}/api/supplier/onboard
+x-api-key: {{newSupplierKey}}
+Content-Type: application/json
+
+{
+    "hardwareId": "{{sensorHardwareId}}",
+    "deliveryId": "{{deliveryId}}"
+}
+
+### -----------------------------------------------------------------
+### SCHRITT 3: Grenzwerte versiegeln (SUPPLIER-AKTION)
+### -----------------------------------------------------------------
+# Nutzt die DeliveryId in der URL.
+# Status in DB wird 'IN_TRANSIT'. Blockchain speichert LIMIT-Composite-Key.
+POST {{baseUrl}}/api/supplier/set-limit/{{deliveryId}}
+x-api-key: {{newSupplierKey}}
+Content-Type: application/json
+
+{
+    "maxTemp": 8.0,
+    "minTemp": 2.0,
+    "maxHum": 60.0,
+    "minHum": 40.0
+}

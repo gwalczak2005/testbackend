@@ -576,23 +576,28 @@ app.get('/api/admin/history/:supplier/:deliveryId', supplierAuth, (req, res) => 
 });
 
 // 2.8 Registrieren eines neuen Lieferanten im System => legt einen lokalen Account an und registriert die Identität auf der Blockchain.
-app.post('/api/admin/onboard-supplier', adminAuth, async (req, res) => {
-    const { supplierName, password, apiKey } = req.body;
+app.post('/api/admin/onboard-supplier', supplierAuth, async (req, res) => {
+    // 1. Berechtigungsprüfung (Nur Admins dürfen neue Supplier anlegen)
+    if (req.user.role !== "ADMIN") {
+        return res.status(403).json({ error: "Nur Admins erlaubt." });
+    }
 
-    // 1. Validierung der Eingabedaten
-    if (!supplierName || !apiKey || !password) {
+    const { supplierName, apiKey } = req.body;
+
+    // 2. Validierung der Pflichtfelder für dein Schema
+    if (!supplierName || !apiKey) {
         return res.status(400).json({ 
-            error: "Name, Passwort und API-Key sind erforderlich." 
+            error: "supplierName und apiKey sind erforderlich." 
         });
     }
 
-    // 2. Lokale Registrierung in der SQLite (api_users Tabelle)
-    // Wir speichern hier die technischen Zugangsdaten, die NICHT auf die Blockchain gehören.
-    const sql = `INSERT INTO api_users (username, password, role, owner, api_key) VALUES (?, ?, ?, ?, ?)`;
-    const username = supplierName.toLowerCase();
-
-    db.run(sql, [username, password, 'SUPPLIER', supplierName, apiKey], async function(err) {
+    // 3. Lokale Registrierung in der SQLite (api_users Tabelle)
+    // Wir nutzen nur die Spalten, die laut deinem Screenshot existieren.
+    const sqlInsert = `INSERT INTO api_users (api_key, role, owner) VALUES (?, 'SUPPLIER', ?)`;
+    
+    db.run(sqlInsert, [apiKey, supplierName], async function(err) {
         if (err) {
+            console.error("❌ Lokaler DB-Fehler:", err.message);
             return res.status(500).json({ 
                 error: "Fehler beim Anlegen des Lieferanten in der DB: " + err.message 
             });
@@ -600,34 +605,36 @@ app.post('/api/admin/onboard-supplier', adminAuth, async (req, res) => {
 
         console.log(`[GATEWAY] Lokaler Account erstellt für: ${supplierName}`);
 
-        // 3. Blockchain-Registrierung (Die "digitale Urkunde")
-        // Wir nutzen einen Try-Catch Block, damit das Gateway stabil bleibt, 
-        // auch wenn der Chaincode-Aufruf fehlschlägt.
+        // 4. Blockchain-Registrierung (Die "digitale Urkunde")
         try {
+            // Blockchain-Verbindung sicherstellen
+            if (!contract) {
+                console.log("🔗 Initialisiere Blockchain-Verbindung...");
+                await initBlockchain();
+            }
+
             console.log(`🔗 BLOCKCHAIN: Registriere Lieferant '${supplierName}' im Ledger...`);
             
-            // Aufruf der neuen Chaincode-Funktion
-            // Wir übergeben Metadaten, aber keine Passwörter!
+            // Aufruf der Chaincode-Funktion
             await contract.submitTransaction(
                 'RegisterSupplier', 
                 supplierName, 
                 "Zertifizierter Logistikpartner (Neuaufnahme 2026)"
             );
 
-            // 4. Erfolg: Antwort an den Admin
+            // 5. Erfolg: Antwort an den Admin
             res.status(201).json({
                 status: "Success",
                 message: `Lieferant '${supplierName}' wurde lokal und auf der Blockchain registriert.`,
                 data: {
-                    username: username,
+                    supplier: supplierName,
                     blockchainId: `SUPPLIER_${supplierName}`,
                     role: "SUPPLIER"
                 }
             });
 
         } catch (bcError) {
-            // Im Fehlerfall markieren wir den User lokal als "nicht synchronisiert" 
-            // oder geben eine entsprechende Warnung zurück.
+            // Falls Blockchain fehlschlägt, ist der User lokal trotzdem angelegt (Partial Success)
             console.error("❌ Blockchain-Fehler bei Onboarding:", bcError.message);
             
             res.status(201).json({
@@ -639,7 +646,6 @@ app.post('/api/admin/onboard-supplier', adminAuth, async (req, res) => {
         }
     });
 });
-
 
 // ==========================================
 // 3. Supplier Area (/api/supplier)
@@ -777,34 +783,47 @@ app.get('/api/supplier/history/:deliveryId', supplierAuth, (req, res) => {
 });
 
 //3.5 Supplier onboardet seine Lieferung selbst
-app.post('/api/supplier/onboard', supplierAuth, (req, res) => {
-    const supplierName = req.user.owner; // Der Name wird sicher aus dem API-Key gezogen
+app.post('/api/supplier/onboard', supplierAuth, async (req, res) => {
+    const supplierName = req.user.owner;
     const { hardwareId, deliveryId } = req.body;
         
-    if (!supplierName) {
-        return res.status(403).json({ error: "Zugriff verweigert", message: "Kein Owner im Key gefunden." });
+    if (!hardwareId || !deliveryId) {
+        return res.status(400).json({ error: "hardwareId und deliveryId erforderlich." });
     }
 
     const uniqueSensorId = `${supplierName}_${hardwareId}`;
 
+    // Status 'PENDING_LIMITS' signalisiert, dass die Logistik steht, aber die QS noch fehlt
     const sql = `INSERT INTO hardware_mappings (sensor_id, supplier_name, delivery_id, is_active, status) 
-                 VALUES (?, ?, ?, 1, 'IN_TRANSIT')`;
+                 VALUES (?, ?, ?, 1, 'PENDING_LIMITS')`;
 
-    db.run(sql, [uniqueSensorId, supplierName, deliveryId], (err) => {
-        if (err) return res.status(500).json({ error: "Sensor bereits belegt oder Fehler: " + err.message });
-        res.json({ status: "Success", message: "Lieferung durch Supplier onboarded", systemId: uniqueSensorId });
+    db.run(sql, [uniqueSensorId, supplierName, deliveryId], async (err) => {
+        if (err) return res.status(500).json({ error: "Sensor belegt: " + err.message });
+        
+        try {
+            // Blockchain: Registrierung des logistischen Vorgangs
+            await contract.submitTransaction('InitializeDelivery', deliveryId, supplierName, uniqueSensorId);
+            
+            res.json({ 
+                status: "Success", 
+                message: "Lieferung registriert. Bitte Grenzwerte definieren.",
+                systemId: uniqueSensorId 
+            });
+        } catch (bcError) {
+            res.json({ status: "Partial Success", message: "Lokal registriert, Blockchain verzögert." });
+        }
     });
 });
 
 // 3.6 Supplier legt Grenzwerte fest
 app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) => {
-    const { deliveryId } = req.params;
+    const { deliveryId } = req.params; // Eindeutige ID aus der URL
     const { maxTemp, minTemp, maxHum, minHum } = req.body;
     
     // Identität wird sicher aus dem API-Key (Header) extrahiert
     const supplier = req.user.owner; 
 
-    console.log(`\n--- Limit-Setzung gestartet für: ${deliveryId} (${supplier}) ---`);
+    console.log(`\n--- SCHRITT 3: Limit-Setzung für: ${deliveryId} (${supplier}) ---`);
 
     try {
         // 1. Blockchain-Verbindung sicherstellen
@@ -814,6 +833,7 @@ app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) =
         }
 
         // 2. Unveränderlich im Smart Contract speichern
+        // Wir nutzen 'SetLimit' - achte darauf, dass dieser Name im Chaincode existiert
         console.log("📡 Sende Transaktion 'SetLimit' an Hyperledger Fabric...");
         await contract.submitTransaction(
             'SetLimit', 
@@ -824,11 +844,11 @@ app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) =
             maxHum.toString(), 
             minHum.toString()
         );
-        console.log("✅ Blockchain-Antwort erhalten: Limits versiegelt.");
+        console.log("✅ Blockchain: Limits wurden im Ledger versiegelt.");
 
-        // 3. Im lokalen SQLite-Cache spiegeln
+        // 3. Im lokalen SQLite-Cache spiegeln & Status auf 'IN_TRANSIT' setzen
         const sqlUpdate = `UPDATE hardware_mappings 
-                           SET max_temp = ?, min_temp = ?, max_hum = ?, min_hum = ? 
+                           SET max_temp = ?, min_temp = ?, max_hum = ?, min_hum = ?, status = 'IN_TRANSIT' 
                            WHERE supplier_name = ? AND delivery_id = ? AND is_active = 1`;
                            
         db.run(sqlUpdate, [maxTemp, minTemp, maxHum, minHum, supplier, deliveryId], function(err) {
@@ -838,14 +858,14 @@ app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) =
             }
             
             if (this.changes === 0) {
-                console.warn("⚠️ Keine Datenbank-Änderung: Lieferung existiert nicht oder ist inaktiv.");
+                console.warn("⚠️ Keine Änderung: Lieferung existiert nicht, ist inaktiv oder gehört anderem Supplier.");
                 return res.status(404).json({ error: "Lieferung nicht gefunden oder bereits abgeschlossen." });
             }
 
-            console.log("💾 Lokale Datenbank aktualisiert.");
+            console.log("💾 Lokale Datenbank aktualisiert (Status: IN_TRANSIT).");
             res.json({ 
                 status: "Success",
-                message: `Grenzwerte für Lieferung ${deliveryId} wurden durch ${supplier} versiegelt.`,
+                message: `Grenzwerte für ${deliveryId} versiegelt. Überwachung ist jetzt aktiv.`,
                 limits: { maxTemp, minTemp, maxHum, minHum }
             });
         });

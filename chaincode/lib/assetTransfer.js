@@ -18,21 +18,35 @@ class AssetTransfer extends Contract {
 
     // Setzt spezifische Grenzwerte für eine Lieferung (Soll-Werte)
     async SetLimit(ctx, supplierName, deliveryId, maxTemp, minTemp, maxHum, minHum) {
-        const limitKey = ctx.stub.createCompositeKey('limit', [supplierName, deliveryId]);
-        
-        const limitEntry = {
-            Supplier: supplierName,
-            DeliveryID: deliveryId,
-            MaxTemp: parseFloat(maxTemp),
-            MinTemp: parseFloat(minTemp),
-            MaxHum: parseFloat(maxHum),
-            MinHum: parseFloat(minHum),
-            UpdatedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString()
-        };
-
-        await ctx.stub.putState(limitKey, Buffer.from(stringify(limitEntry)));
-        return JSON.stringify(limitEntry);
+    // 1. Validierung der Business-Logik
+    if (parseFloat(minTemp) >= parseFloat(maxTemp)) {
+        throw new Error("MinTemp muss kleiner als MaxTemp sein.");
     }
+    if (parseFloat(minHum) >= parseFloat(maxHum)) {
+        throw new Error("MinHum muss kleiner als MaxHum sein");
+    }
+
+    // 2. Erstellung des Composite Keys
+    const limitKey = ctx.stub.createCompositeKey('limit', [supplierName, deliveryId]);
+
+    // 3. Daten-Objekt erstellen
+    const limitEntry = {
+        Type: 'LIMIT', // Wichtig für spätere Abfragen/Filter
+        Supplier: supplierName,
+        DeliveryID: deliveryId,
+        MaxTemp: parseFloat(maxTemp),
+        MinTemp: parseFloat(minTemp),
+        MaxHum: parseFloat(maxHum),
+        MinHum: parseFloat(minHum),
+        UpdatedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString()
+    };
+
+    // 4. Speichern
+    await ctx.stub.putState(limitKey, Buffer.from(JSON.stringify(limitEntry)));
+    
+    console.info(`✅ Limits für Lieferung ${deliveryId} im Ledger gespeichert.`);
+    return JSON.stringify(limitEntry);
+}
 
     // Erstellt einen neuen Messpunkt (Ist-Werte) und prüft gegen die Limits
     async CreateAsset(ctx, id, sensorId, temperature, humidity, supplierName, deliveryId, originalTimestamp, lat, lon) {
@@ -195,6 +209,32 @@ class AssetTransfer extends Contract {
     // Speichern im World State der Blockchain
     await ctx.stub.putState(supplierAsset.ID, Buffer.from(JSON.stringify(supplierAsset)));
     return JSON.stringify(supplierAsset);
+    }
+
+    // Initialisiert den logistischen Status einer Lieferung
+    async InitializeDelivery(ctx, supplierName, deliveryId) {
+        // Wir nutzen exakt denselben Composite Key wie in ConfirmDelivery und FinalizeDelivery
+        const statusKey = ctx.stub.createCompositeKey('status', [supplierName, deliveryId]);
+        
+        // Prüfen, ob die Lieferung für diesen Supplier bereits existiert
+        const existingStatus = await ctx.stub.getState(statusKey);
+        if (existingStatus && existingStatus.length > 0) {
+            throw new Error(`Die Lieferung ${deliveryId} für den Supplier ${supplierName} existiert bereits im Ledger.`);
+        }
+
+        const initialStatus = {
+            Type: 'STATUS',
+            Supplier: supplierName,
+            DeliveryID: deliveryId,
+            Status: 'IN_TRANSIT', // Standard-Startstatus
+            CreatedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString()
+        };
+
+        // Speichern im World State
+        await ctx.stub.putState(statusKey, Buffer.from(JSON.stringify(initialStatus)));
+        
+        console.info(`✅ Lieferung ${deliveryId} erfolgreich auf der Blockchain initialisiert.`);
+        return JSON.stringify(initialStatus);
     }
 }
 
