@@ -25,7 +25,7 @@ const tlsCertPath = path.join(walletPath, 'tls', 'ca.crt');
 
 //Schlüssel-Datenbank 
 const API_KEYS = {
-    "MASTER_ADMIN_2026": { role: "ADMIN", owner: "Großunternehmen" },
+    "DEIN_ADMIN_MASTER_KEY": { role: "ADMIN", owner: "Großunternehmen" },
     "KEY_SUPPLIER_A": { role: "SUPPLIER", owner: "Supplier_A" }
 };
 
@@ -229,6 +229,8 @@ db.serialize(() => {
         }
     });
 });
+
+
 
 //API-ROUTES
 
