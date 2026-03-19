@@ -212,7 +212,7 @@ class AssetTransfer extends Contract {
     }
 
     // Initialisiert den logistischen Status einer Lieferung
-    async InitializeDelivery(ctx, supplierName, deliveryId) {
+    async InitializeDelivery(ctx, supplierName, deliveryId, uniqueSensorId) {
         // Wir nutzen exakt denselben Composite Key wie in ConfirmDelivery und FinalizeDelivery
         const statusKey = ctx.stub.createCompositeKey('status', [supplierName, deliveryId]);
         
@@ -226,7 +226,8 @@ class AssetTransfer extends Contract {
             Type: 'STATUS',
             Supplier: supplierName,
             DeliveryID: deliveryId,
-            Status: 'IN_TRANSIT', // Standard-Startstatus
+            SensorID: uniqueSensorId,
+            Status: 'PENDING_LIMITS', // Standard-Startstatus
             CreatedAt: new Date((ctx.stub.getTxTimestamp().seconds.low) * 1000).toISOString()
         };
 

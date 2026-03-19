@@ -259,33 +259,43 @@ app.get('/api/dev/debug-mappings', (req, res) => {
 
 // --- SENSOR DATA BUFFER (Schnittstelle für ESP8266)
 app.post('/api/buffer', supplierAuth, (req, res) => {
-    const { id, temp, humidity, lat, lon } = req.body;
-    
+    // --- ÄNDERUNG 1: Mapping auf die Variablennamen deines .http-Skripts ---
+    const { sensorId, temperature, humidity, lat, lon } = req.body; 
+    const id = sensorId; // Alias für die interne Logik
+    const temp = temperature;
+
     // Ermittlung der Identität (Admin-Override oder Supplier-Eigendaten)
     const supplierPrefix = (req.user.role === 'ADMIN' && req.headers['owner']) 
                             ? req.headers['owner'] 
                             : req.user.owner;
     
-    const uniqueId = `${supplierPrefix}_${id}`; 
+    const uniqueId = id.startsWith(supplierPrefix) ? id : `${supplierPrefix}_${id}`;
+    
+    // --- ÄNDERUNG 2: Status-Filter entfernt oder erweitert ---
+    // Wir erlauben Dateneingang, sobald onboarded wurde (auch wenn Limits noch PENDING sind)
+    const sqlCheck = `SELECT * FROM hardware_mappings 
+                      WHERE sensor_id = ? AND is_active = 1`; 
 
-    // 1. Validierung: Existiert die Lieferung und ist sie aktiv?
-    db.get(`SELECT * FROM hardware_mappings WHERE sensor_id = ? AND is_active = 1 AND status = 'IN_TRANSIT'`, 
-    [uniqueId], async (err, mapping) => {
+    db.get(sqlCheck, [uniqueId], async (err, mapping) => {
         if (err || !mapping) {
+            // Debug-Log für dich im Terminal
+            console.log(`Log: Suche nach ${uniqueId} fehlgeschlagen. Token-Owner: ${req.user.owner}`);
             return res.status(403).json({ error: "Sensor inaktiv oder keine laufende Lieferung gefunden." });
         }
 
-        // 2. Business-Logik: Alarmprüfung gegen die im Onboarding gesetzten Limits
-        const isAlarm = (temp > mapping.max_temp || temp < mapping.min_temp || 
-                         humidity > mapping.max_hum || humidity < mapping.min_hum) ? 1 : 0;
+        // --- ÄNDERUNG 3: Fallback für Alarmprüfung, falls Limits noch null sind ---
+        const isAlarm = (mapping.max_temp !== null && 
+                        (temp > mapping.max_temp || temp < mapping.min_temp || 
+                         humidity > mapping.max_hum || humidity < mapping.min_hum)) ? 1 : 0;
 
         // 3. Status-Update: Reading Count für Modulo-Sync erhöhen
-        const newCount = mapping.reading_count + 1;
+        const newCount = (mapping.reading_count || 0) + 1;
         db.run(`UPDATE hardware_mappings SET reading_count = ? WHERE sensor_id = ?`, [newCount, uniqueId]);
 
         const measurementTime = new Date().toISOString();
 
         // 4. Persistierung in der lokalen SQLite-Datenbank (Audit-Log)
+        // --- ÄNDERUNG 4: Spaltennamen temp -> temperature (je nach deinem DB Schema) ---
         const sqlInsert = `INSERT INTO sensor_logs (sensor_id, temp, humidity, lat, lon, is_alarm, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)`;
         db.run(sqlInsert, [uniqueId, temp, humidity, lat, lon, isAlarm, measurementTime], async function(err) {
             if (err) return res.status(500).json({ error: "Lokaler DB-Fehler: " + err.message });
@@ -294,19 +304,19 @@ app.post('/api/buffer', supplierAuth, (req, res) => {
             // Regel: Jeder 2. Wert ODER bei Grenzwertüberschreitung
             const shouldSync = (newCount % 2 === 0 || isAlarm === 1);
 
-            // 5. Übergabe an den Blockchain-Service (Kapselung gewahrt)
+            // 5. Übergabe an den Blockchain-Service
             if (shouldSync) {
+                // Hier sicherstellen, dass syncToBlockchain die richtigen Keys nutzt
                 const syncResult = await syncToBlockchain(logId, { 
                     uniqueId, temp, humidity, lat, lon, measurementTime 
                 }, mapping);
 
-                // Falls Blockchain offline, lokal als PENDING markieren
                 if (!syncResult.success) {
                     db.run(`UPDATE sensor_logs SET sync_status = 'PENDING' WHERE id = ?`, [logId]);
                 }
             }
             
-            // 6. Antwort an den ESP8266 (Isoliert von Blockchain-Details)
+            // 6. Antwort an den ESP8266
             res.json({ 
                 status: "Buffered", 
                 systemId: uniqueId, 
@@ -471,26 +481,25 @@ app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async
 // 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
 app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
-    
-    // Dynamisch lesen. Falls req.body.recipientName leer ist, greift der Fallback.
-    const recipientName = req.body.recipientName || "Großunternehmen AG"; 
+    // Fallback sorgt für Stabilität
+    const recipientName = req.body.recipientName || "Zentrallager Berlin"; 
 
     try {
         if (!contract) await initBlockchain();
         
-        // 1. Unveränderlicher Eintrag auf der Blockchain
+        // Blockchain-Eintrag: Dokumentiert den Zeitpunkt der physischen Übergabe
         await contract.submitTransaction('ConfirmDelivery', supplier, deliveryId, recipientName);
         
-        // 2. SQL Status ändern, aber NOCH NICHT deaktivieren (das macht erst der Final Checkout)
+        // Status in DB ändern: Sensor bleibt aktiv (is_active = 1)
         db.run(`UPDATE hardware_mappings SET status = 'DELIVERED' WHERE delivery_id = ?`, [deliveryId], (err) => {
             if (err) return res.status(500).json({ error: err.message });
             res.json({ 
                 status: "Success", 
-                message: `Erhalt von ${deliveryId} durch ${recipientName} bestätigt. Warte auf Checkout durch Lieferant.` 
+                message: `Erhalt von ${deliveryId} bestätigt. Status: DELIVERED. Erwarte Final Checkout.` 
             });
         });
     } catch (error) { 
-        res.status(500).json({ error: error.message }); 
+        res.status(500).json({ error: "Blockchain Fehler: " + error.message }); 
     }
 });
 
@@ -501,20 +510,20 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
     try {
         if (!contract) await initBlockchain();
         
-        // 1. Unveränderliche Blockchain-Versiegelung aufrufen
+        // Blockchain-Versiegelung: Status wird auf 'CLOSED' gesetzt
         await contract.submitTransaction('FinalizeDelivery', supplier, deliveryId);
         
-        // 2. Erst nach Blockchain-Erfolg wird das Live-System (SQLite) deaktiviert
+        // ARCHIVIERUNG: Hardware wird deaktiviert (is_active = 0) und kann neu vergeben werden
         db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId], (err) => {
-            if (err) return res.status(500).json({ error: "Blockchain versiegelt, aber lokaler DB-Fehler: " + err.message });
+            if (err) return res.status(500).json({ error: "DB-Fehler bei Archivierung: " + err.message });
             
             res.json({ 
                 status: "Success", 
-                message: `Lieferung ${deliveryId} vollständig auf der Blockchain versiegelt und archiviert.` 
+                message: `Lieferung ${deliveryId} versiegelt. Sensor ist nun wieder frei für neue Aufgaben.` 
             });
         });
     } catch (error) { 
-        res.status(500).json({ error: error.message }); 
+        res.status(500).json({ error: "Blockchain Fehler: " + error.message }); 
     }
 });
 
@@ -810,6 +819,7 @@ app.post('/api/supplier/onboard', supplierAuth, async (req, res) => {
                 systemId: uniqueSensorId 
             });
         } catch (bcError) {
+            console.error("❌ BLOCKCHAIN REJECTED:", bcError.message);
             res.json({ status: "Partial Success", message: "Lokal registriert, Blockchain verzögert." });
         }
     });

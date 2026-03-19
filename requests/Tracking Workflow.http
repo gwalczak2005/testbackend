@@ -2,7 +2,7 @@
 ### ZWISCHENTEST: ONBOARDING & LIMIT-SETZUNG
 ### =================================================================
 
-@baseUrl = http://192.168.1.208:3000
+@baseUrl = http://192.168.1.202:3000
 @adminKey = DEIN_ADMIN_MASTER_KEY
 @newSupplierKey = SUPPLIER_B_TOKEN_99
 @newSupplierName = Lieferant_B
@@ -54,3 +54,60 @@ Content-Type: application/json
     "maxHum": 60.0,
     "minHum": 40.0
 }
+
+### -----------------------------------------------------------------
+### SCHRITT 4: Sensordaten einspeisen (GATEWAY/ESP8266 AKTION)
+### -----------------------------------------------------------------
+# Simuliert den ESP8266, der Daten an das Gateway sendet.
+# Das Gateway prüft gegen die versiegelten Limits aus Schritt 3.
+### SCHRITT 4: Sensordaten einspeisen
+POST {{baseUrl}}/api/buffer
+x-api-key: {{newSupplierKey}}
+Content-Type: application/json
+
+{
+    "sensorId": "ESP_99",
+    "temperature": 24.5,
+    "humidity": 50.0,
+    "lat": 52.5200,
+    "lon": 13.4050,
+    "timestamp": "2026-03-19T18:00:00Z"
+}
+
+### -----------------------------------------------------------------
+### SCHRITT 5: Alarme prüfen (SUPPLIER-ANSICHT)
+### -----------------------------------------------------------------
+# Der Lieferant prüft, ob Grenzwerte überschritten wurden.
+GET {{baseUrl}}/api/supplier/alerts
+x-api-key: {{newSupplierKey}}
+
+### -----------------------------------------------------------------
+### SCHRITT 6: Historie abrufen (SUPPLIER-ANSICHT)
+### -----------------------------------------------------------------
+# Spezifische Historie für die Test-Lieferung.
+GET {{baseUrl}}/api/supplier/history/{{deliveryId}}
+x-api-key: {{newSupplierKey}}
+
+### -----------------------------------------------------------------
+### SCHRITT 7: Globale Überwachung (ADMIN-ANSICHT)
+### -----------------------------------------------------------------
+# Der Admin (Großunternehmen) sieht ALLE Alarme systemweit.
+GET {{baseUrl}}/api/admin/alerts
+x-api-key: {{adminKey}}
+
+### -----------------------------------------------------------------
+### SCHRITT 8: Erhalt bestätigen (Admin/Empfänger)
+### -----------------------------------------------------------------
+POST {{baseUrl}}/api/admin/confirm-receipt/{{newSupplierName}}/{{deliveryId}}
+x-api-key: {{adminKey}}
+Content-Type: application/json
+
+{
+    "recipientName": "Zentrallager Berlin"
+}
+
+### -----------------------------------------------------------------
+### SCHRITT 9: Lieferung finalisieren (Admin/Supplier)
+### -----------------------------------------------------------------
+POST {{baseUrl}}/api/admin/final-checkout/{{newSupplierName}}/{{deliveryId}}
+x-api-key: {{adminKey}}
