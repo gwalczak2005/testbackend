@@ -4,11 +4,11 @@
 
 @baseUrl = http://192.168.1.200:3000
 @adminKey = MASTER_ADMIN_2026
-@newSupplierKey = SUPPLIER_B_TOKEN_99
-@newSupplierName = Lieferant_B
+@newSupplierKey = SUPPLIER_B_TOKEN_01
+@newSupplierName = Lieferant_C
 @newSupplierPass = start123
-@deliveryId = SHIP-2026-B-TEST
-@sensorHardwareId = ESP_99
+@deliveryId = SHIP-2026_002
+@sensorHardwareId = ESP_02
 
 ### -----------------------------------------------------------------
 ### SCHRITT 1: Lieferant im System aufnehmen (ADMIN-AKTION)
@@ -66,8 +66,8 @@ x-api-key: {{newSupplierKey}}
 Content-Type: application/json
 
 {
-    "sensorId": "ESP_99",
-    "temperature": 24.5,
+    "sensorId": "ESP_02",
+    "temperature": 2.5,
     "humidity": 50.0,
     "lat": 52.5200,
     "lon": 13.4050,

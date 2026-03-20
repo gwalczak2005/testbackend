@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const PDFDocument = require('pdfkit');
+const QRCode = require('qrcode');
 
 const walletPath = path.resolve(__dirname, 'wallet', 'org1-admin');
 const certPath = path.join(walletPath, 'msp', 'signcerts', 'cert.pem');
@@ -565,40 +566,102 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
 
     try {
         if (!contract) await initBlockchain();
-        
-        // 1. Blockchain-Versiegelung
+
+        // 1. BLOCKCHAIN-AKTION: Status verriegeln
         await contract.submitTransaction('FinalizeDelivery', supplier, deliveryId);
-        
-        // 2. PDF-Erzeugung
-        const fileName = `Report_${deliveryId}.pdf`;
-        const filePath = path.join(__dirname, 'reports', fileName);
-        const doc = new PDFDocument();
-        
-        if (!fs.existsSync('./reports')) fs.mkdirSync('./reports');
-        
-        const writeStream = fs.createWriteStream(filePath);
-        doc.pipe(writeStream);
-        doc.fontSize(20).text('ABNAHMEPROTOKOLL', { align: 'center' });
-        doc.text(`Lieferung: ${deliveryId}`);
-        doc.text(`Status: Blockchain-verifiziert`);
-        doc.end();
 
-        // 3. WICHTIG: Erst wenn die Datei fertig geschrieben ist, DB updaten
-        writeStream.on('finish', () => {
-            db.serialize(() => {
-                // Mapping deaktivieren
-                db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId]);
+        // 2. DATEN FÜR PDF SAMMELN (Startzeit, Endzeit und Alarme)
+        const statsQuery = `
+            SELECT 
+                MIN(l.timestamp) as start_time, 
+                MAX(l.timestamp) as end_time,
+                SUM(CASE WHEN l.is_alarm = 1 THEN 1 ELSE 0 END) as alarm_count
+            FROM sensor_logs l
+            JOIN hardware_mappings m ON l.sensor_id = m.sensor_id
+            WHERE m.delivery_id = ? AND m.is_active = 1`;
 
-                // DEN PFAD REGISTRIEREN (Das hat gefehlt!)
-                db.run(`INSERT OR REPLACE INTO delivery_reports (delivery_id, pdf_path, integrity_status) 
-                        VALUES (?, ?, ?)`, [deliveryId, filePath, 'VERIFIED'], (err) => {
-                    
-                    if (err) return res.status(500).json({ error: "DB-Fehler bei Report-Eintrag: " + err.message });
-                    
-                    res.json({ 
-                        status: "Success", 
-                        message: `Lieferung ${deliveryId} versiegelt und Report generiert.`,
-                        downloadUrl: `/api/admin/download-report/${deliveryId}` 
+        db.get(statsQuery, [deliveryId], async (err, stats) => {
+            if (err) {
+                    console.error("SQL Fehler:", err.message); // Hilft beim Debuggen im Terminal
+                    return res.status(500).json({ error: "Fehler beim Datenabruf für Report: " + err.message });
+            }
+            // Fallback, falls keine Daten vorhanden sind (verhindert PDF-Absturz)
+            const startTime = stats.start_time || "Keine Daten";
+            const alarmCount = stats.alarm_count || 0;
+
+            // 3. QR-CODE GENERIEREN
+            // Erstellt einen Link zur Audit-Ansicht für den Browser
+            const auditUrl = `http://${req.get('host')}/api/supplier/${supplier}/audit/${deliveryId}?apiKey=${req.user.apiKey}`;
+            const qrCodeDataUrl = await QRCode.toDataURL(auditUrl);
+
+            // 4. PDF-ERZEUGUNG
+            const fileName = `Report_${deliveryId}.pdf`;
+            const filePath = path.join(__dirname, 'reports', fileName);
+            if (!fs.existsSync('./reports')) fs.mkdirSync('./reports');
+
+            const doc = new PDFDocument({ margin: 50 });
+            const writeStream = fs.createWriteStream(filePath);
+            doc.pipe(writeStream);
+
+            // --- HEADER ---
+            // doc.image('basf_logo.png', 50, 45, { width: 60 }); // Falls Logo vorhanden
+            doc.fillColor('#00417F').fontSize(20).text('Lieferungsnachweiszertifikat', 120, 50, { align: 'right' });
+            doc.fontSize(10).fillColor('#000').text(`Zertifikats-ID: ${deliveryId}`, { align: 'right' });
+            doc.moveDown(1.5);
+            doc.path('M 50 100 L 550 100').stroke('#00417F'); // Trennlinie
+
+            // --- ECKDATEN (SUMMARY) ---
+            doc.moveDown(2);
+            doc.fontSize(12).fillColor('#444').text('Transport-Zusammenfassung', { underline: true });
+            doc.moveDown(0.5);
+            doc.fontSize(10).fillColor('#000');
+            doc.text(`Logistik-Partner:    ${supplier}`);
+            doc.text(`Zustellung an:       BASF Zentrallager Ludwigshafen`);
+            doc.text(`Start-Zeitpunkt:     ${stats.start_time || 'N/A'}`);
+            doc.text(`Abschluss-Zeit:      ${new Date().toLocaleString('de-DE')}`);
+            doc.text(`Status:              SICHER VERSIEGELT`);
+
+            // --- ALARM-ÜBERSICHT (MITTIG) ---
+            doc.moveDown(4);
+            doc.rect(50, doc.y, 500, 25).fill('#f2f2f2');
+            doc.fillColor('#00417F').text('Compliance Audit', 55, doc.y - 18);
+            doc.moveDown(1.5);
+
+            if (!stats.alarm_count || stats.alarm_count === 0) {
+                doc.fillColor('green').fontSize(12).text('KONFORM: Alle Grenzwerte wurden lückenlos eingehalten.', { align: 'center' });
+            } else {
+                doc.fillColor('red').fontSize(12).text(`DISKREPANZ: ${stats.alarm_count} Grenzwert-Überschreitungen registriert.`, { align: 'center' });
+            }
+
+            // --- QR-CODE & AUDIT ---
+            doc.moveDown(3);
+            const qrY = doc.y;
+            doc.fillColor('#000').fontSize(12).text('Digitales Audit-Verfahren', 50, qrY, { underline: true });
+            doc.fontSize(9).text('Dieser Bericht ist durch einen kryptografischen Hash auf dem Hyperledger Fabric Ledger geschützt. Scannen Sie den QR-Code, um die lückenlose Historie einzusehen.', 50, qrY + 20, { width: 320 });
+            doc.image(qrCodeDataUrl, 400, qrY, { width: 100 });
+
+            // --- FOOTER ---
+            doc.fontSize(8).fillColor('#999').text('BASF Digital Logistics Framework - Automatisierte Blockchain-Verifizierung - Ohne Unterschrift gültig.', 50, 700, { align: 'center' });
+
+            doc.end();
+
+            // 5. ABSCHLUSS: DB-Status & Registrierung
+            writeStream.on('finish', () => {
+                db.serialize(() => {
+                    // Status auf CLOSED setzen
+                    db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId]);
+
+                    // PDF-Pfad registrieren
+                    db.run(`INSERT OR REPLACE INTO delivery_reports (delivery_id, pdf_path, integrity_status) 
+                            VALUES (?, ?, ?)`, [deliveryId, filePath, stats.alarm_count > 0 ? 'ALARM_LOGGED' : 'VERIFIED'], (err) => {
+                        
+                        if (err) return res.status(500).json({ error: "DB-Fehler bei Report-Eintrag" });
+                        
+                        res.json({ 
+                            status: "Success", 
+                            message: `Report für ${deliveryId} wurde generiert.`,
+                            downloadUrl: `/api/admin/download-report/${deliveryId}` 
+                        });
                     });
                 });
             });
