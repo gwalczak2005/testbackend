@@ -1,77 +1,94 @@
 const axios = require('axios');
 
-const BASE_URL = 'http://127.0.0.1:3000';
+// Falls dein Server auf einer anderen IP läuft, hier anpassen (z.B. 192.168.1.200)
+const BASE_URL = 'http://localhost:3000'; 
 const ADMIN_KEY = 'MASTER_ADMIN_2026';
 
-async function runTest() {
-    console.log("🚀 START: Lifecycle & Versiegelungs-Test (Final Checkout)...");
+const SEED_CONFIG = {
+    suppliers: [
+        { name: 'Logistik_Pro_A', key: 'KEY_PRO_A' },
+        { name: 'Kühl_Express_B', key: 'KEY_EXPRESS_B' },
+        { name: 'Global_Transport_C', key: 'KEY_TRANS_C' },
+        { name: 'Med_Logistix_D', key: 'KEY_MED_D' },
+        { name: 'Food_Safety_E', key: 'KEY_FOOD_E' }
+    ],
+    deliveriesPerSupplier: 1,
+    readingsPerDelivery: 5
+};
 
+async function runSeed() {
     try {
-        // --- SCHRITT 1: ONBOARDING ---
-        console.log("\n📦 1. Onboarding für Supplier A...");
-        await axios.post(`${BASE_URL}/api/admin/onboard`, {
-            hardwareId: "SENSOR-01", supplierName: "Supplier_A", deliveryId: "SHIP-A-100"
-        }, { headers: { 'x-api-key': ADMIN_KEY } });
-        console.log(`✅ Sensor registriert.`);
+        console.log("🚀 Starte automatisiertes Seeding basierend auf Workflow...");
 
-        // --- SCHRITT 2: LIMITS SETZEN ---
-        console.log("\n⚙️ 2. Setze Grenzwerte...");
-        await axios.post(`${BASE_URL}/api/admin/set-limit/Supplier_A/SHIP-A-100`, {
-            maxTemp: 24.0, minTemp: 2.0, maxHum: 60.0, minHum: 20.0
-        }, { headers: { 'x-api-key': ADMIN_KEY } });
-        console.log(`✅ Limits synchronisiert.`);
+        for (const s of SEED_CONFIG.suppliers) {
+            console.log(`\n--- Bearbeite Supplier: ${s.name} ---`);
 
-        // --- SCHRITT 3: MESSREIHE SIMULIEREN (10 Werte) ---
-        console.log("\n📡 3. LKW ist unterwegs - Sensor funkt 10 Werte...");
-        
-        const testDaten = [
-            { t: 21.5, h: 48 }, { t: 22.0, h: 50 }, { t: 22.5, h: 52 }, // Normal
-            { t: 25.5, h: 55 }, // ALARM (über 24°C)
-            { t: 23.0, h: 50 }, { t: 22.8, h: 49 }, { t: 22.5, h: 48 }, 
-            { t: 22.0, h: 47 }, { t: 21.8, h: 46 }, { t: 21.5, h: 45 }
-        ];
+            // SCHRITT 1: Lieferant im System aufnehmen (ADMIN-AKTION)
+            console.log(`👤 Onboarding Supplier...`);
+            await axios.post(`${BASE_URL}/api/admin/onboard-supplier`, {
+                supplierName: s.name,
+                password: 'start123',
+                apiKey: s.key
+            }, { headers: { 'x-api-key': ADMIN_KEY } });
 
-        for (let i = 0; i < testDaten.length; i++) {
-            const data = testDaten[i];
-            const res = await axios.post(`${BASE_URL}/api/buffer`, 
-                { id: "SENSOR-01", temp: data.t, humidity: data.h }, 
-                { headers: { 'x-api-key': ADMIN_KEY, 'owner': 'Supplier_A' } }
-            );
-            
-            console.log(`[Messung ${i+1}/10] Temp: ${data.t}°C -> Blockchain-Sync: ${res.data.blockchainSync} | Alarm: ${res.data.isAlarm}`);
-            
-            // Ganz kurze Pause (optional), damit die Zeitstempel minimal variieren
-            await new Promise(r => setTimeout(r, 500)); 
+            for (let d = 1; d <= SEED_CONFIG.deliveriesPerSupplier; d++) {
+                const deliveryId = `DEL-${s.name}-${d}`;
+                const sensorHardwareId = `ESP-${s.name}-${d}`;
+
+                // SCHRITT 2: Lieferung registrieren (SUPPLIER-AKTION)
+                console.log(`📦 Registriere Lieferung: ${deliveryId}`);
+                await axios.post(`${BASE_URL}/api/supplier/onboard`, {
+                    hardwareId: sensorHardwareId, // Korrekt: hardwareId laut deinem .http Script
+                    deliveryId: deliveryId
+                }, { headers: { 'x-api-key': s.key } });
+
+                // SCHRITT 3: Grenzwerte versiegeln (SUPPLIER-AKTION)
+                console.log(`⚖️ Setze Grenzwerte für ${deliveryId}...`);
+                await axios.post(`${BASE_URL}/api/supplier/set-limit/${deliveryId}`, {
+                    maxTemp: 8.0,
+                    minTemp: 2.0,
+                    maxHum: 60.0,
+                    minHum: 40.0
+                }, { headers: { 'x-api-key': s.key } });
+
+                // SCHRITT 4: Sensordaten einspeisen (ESP-SIMULATION)
+                for (let r = 1; r <= SEED_CONFIG.readingsPerDelivery; r++) {
+                    const payload = {
+                        sensorId: sensorHardwareId, // Laut deinem .http Schritt 4 ist es sensorId
+                        temperature: parseFloat((4 + Math.random() * 2).toFixed(2)),
+                        humidity: parseFloat((45 + Math.random() * 5).toFixed(2)),
+                        lat: 52.5200,
+                        lon: 13.4050,
+                        timestamp: new Date().toISOString()
+                    };
+
+                    console.log(`📡 Sende Messwert ${r}/${SEED_CONFIG.readingsPerDelivery} für ${deliveryId}`);
+                    await axios.post(`${BASE_URL}/api/buffer`, payload, { 
+                        headers: { 'x-api-key': s.key } 
+                    });
+                    
+                    await new Promise(res => setTimeout(res, 100));
+                }
+
+                // SCHRITT 8: Erhalt bestätigen (ADMIN-AKTION)
+                console.log(`🤝 Bestätige Erhalt...`);
+                await axios.post(`${BASE_URL}/api/admin/confirm-receipt/${s.name}/${deliveryId}`, {
+                    recipientName: "Zentrallager Automatik"
+                }, { headers: { 'x-api-key': ADMIN_KEY } });
+
+                // SCHRITT 9: Lieferung finalisieren (ADMIN-AKTION)
+                console.log(`🏁 Finaler Checkout für ${deliveryId}...`);
+                await axios.post(`${BASE_URL}/api/admin/final-checkout/${s.name}/${deliveryId}`, 
+                    {}, { headers: { 'x-api-key': ADMIN_KEY } }
+                );
+            }
         }
 
-        // --- SCHRITT 4: EMPFANGSBESTÄTIGUNG (Ware am Ziel) ---
-        console.log("\n🏢 4. Ware kommt an - Empfang wird bestätigt...");
-        const receipt = await axios.post(`${BASE_URL}/api/admin/confirm-receipt/Supplier_A/SHIP-A-100`, 
-            { recipientName: "Großunternehmen Lager West" }, // <-- HIER IST DER FIX!
-            { headers: { 'x-api-key': ADMIN_KEY } }
-        );
-        console.log(`✅ ${receipt.data.message}`);
-
-        // --- SCHRITT 5: FINAL CHECKOUT (Versiegelung der Blockchain) ---
-        console.log("\n🔒 5. Final Checkout - Blockchain wird versiegelt...");
-        const checkout = await axios.post(`${BASE_URL}/api/admin/final-checkout/Supplier_A/SHIP-A-100`, {}, 
-            { headers: { 'x-api-key': ADMIN_KEY } });
-        console.log(`✅ ${checkout.data.message}`);
-
-        // --- SCHRITT 6: DER HACKER/GHOST-TEST ---
-        console.log("\n👻 6. Ghost-Update Test: Sensor funkt nach Abschluss weiter...");
-        try {
-            await axios.post(`${BASE_URL}/api/buffer`, { id: "SENSOR-01", temp: 28.0, humidity: 50 }, 
-                { headers: { 'x-api-key': ADMIN_KEY, 'owner': 'Supplier_A' } });
-            console.log("❌ FEHLER: Der Sensor durfte noch senden! Das sollte nicht passieren.");
-        } catch (ghostError) {
-            console.log(`✅ ABGEWEHRT! System blockiert den Sensor erfolgreich.`);
-            console.log(`👉 Grund: ${ghostError.response ? ghostError.response.data.error : ghostError.message}`);
-        }
-
+        console.log("\n✅ Seeding erfolgreich beendet! Alle 5 Supplier und Lieferungen sind im System.");
     } catch (error) {
-        console.error("\n❌ Unerwarteter Test-Fehler:", error.response ? error.response.data : error.message);
+        const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+        console.error("❌ Fehler beim Seeding:", errorMsg);
     }
 }
 
-runTest();
+runSeed();
