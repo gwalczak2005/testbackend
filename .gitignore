@@ -39,3 +39,11 @@ infrastructure/system-genesis-block/
 # ==================================================
 application/sensor_data.db
 application/wallet/
+
+# ==================================================
+# PDF-Certificates
+# ==================================================
+/reports/*.pdf
+/sensor_data.db
+node_modules/
+wallet/
