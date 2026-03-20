@@ -697,19 +697,56 @@ app.get('/api/supplier/:supplier/active', supplierAuth, (req, res) => {
 // 3.2 Einsehen der Blockchain-Datenintegrität für den Lieferanten
 app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
+
     try {
-        const mapping = await new Promise((resolve, reject) => {
-            db.get("SELECT sensor_id FROM hardware_mappings WHERE supplier_name = ? AND delivery_id = ?", 
-            [supplier, deliveryId], (err, row) => {
-                if (err || !row) reject(new Error("Lieferung nicht gefunden."));
-                resolve(row);
-            });
-        });
         if (!contract) await initBlockchain();
+
+        // 1. Blockchain-Daten abrufen (Der "Gold-Standard")
         const bcResult = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
-        const bcData = JSON.parse(Buffer.from(bcResult).toString('utf8'));
-        res.json({ deliveryId, status: "Audit erfolgreich", blockchainRecords: bcData.length });
-    } catch (error) { res.status(404).json({ error: error.message }); }
+        const bcRecords = JSON.parse(Buffer.from(bcResult).toString('utf8'));
+
+        // 2. Integritäts-Check vorbereiten
+        let anomalies = [];
+        let verifiedCount = 0;
+
+        // Wir prüfen jeden Blockchain-Eintrag gegen die lokale SQL-DB
+        for (const record of bcRecords) {
+            const sqlMatch = await new Promise((resolve) => {
+                // Suche in sensor_logs nach dem exakten Zeitstempel
+                db.get(
+                    `SELECT temp, humidity FROM sensor_logs 
+                     WHERE sensor_id = (SELECT sensor_id FROM hardware_mappings WHERE delivery_id = ?) 
+                     AND timestamp = ?`,
+                    [deliveryId, record.Timestamp], // record.Timestamp kommt vom Ledger
+                    (err, row) => resolve(row)
+                );
+            });
+
+            if (!sqlMatch) {
+                anomalies.push({ time: record.Timestamp, reason: "Datensatz in SQL fehlt (gelöscht?)" });
+            } else if (Math.abs(sqlMatch.temp - record.Temperature) > 0.01) {
+                // Vergleich mit kleiner Toleranz für Floating Point
+                anomalies.push({ time: record.Timestamp, reason: "Temperatur-Abweichung festgestellt!" });
+            } else {
+                verifiedCount++;
+            }
+        }
+
+        // 3. Ergebnis mit Modulo-Kontext senden
+        res.json({
+            deliveryId,
+            summary: {
+                blockchainTotal: bcRecords.length,
+                integrityVerified: verifiedCount,
+                anomaliesDetected: anomalies.length
+            },
+            status: anomalies.length === 0 ? "INTEGRITY_OK" : "INTEGRITY_COMPROMISED",
+            details: anomalies
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // 3.3 Einsehen aller Alarme für den Lieferanten
@@ -835,7 +872,7 @@ app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) =
     // Identität wird sicher aus dem API-Key (Header) extrahiert
     const supplier = req.user.owner; 
 
-    console.log(`\n--- SCHRITT 3: Limit-Setzung für: ${deliveryId} (${supplier}) ---`);
+    console.log(`\nLimit-Setzung für: ${deliveryId} (${supplier}) ---`);
 
     try {
         // 1. Blockchain-Verbindung sicherstellen
@@ -874,7 +911,8 @@ app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) =
                 return res.status(404).json({ error: "Lieferung nicht gefunden oder bereits abgeschlossen." });
             }
 
-            console.log("💾 Lokale Datenbank aktualisiert (Status: IN_TRANSIT).");
+            console.log("💾 Lokale Datenbank aktualisiert.");
+            console.log(`   📊 Neue Grenzwerte: Temp: ${minTemp}°C - ${maxTemp}°C | Feuchtigkeit: ${minHum}% - ${maxHum}%`);
             res.json({ 
                 status: "Success",
                 message: `Grenzwerte für ${deliveryId} versiegelt. Überwachung ist jetzt aktiv.`,

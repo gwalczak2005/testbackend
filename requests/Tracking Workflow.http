@@ -2,7 +2,7 @@
 ### ZWISCHENTEST: ONBOARDING & LIMIT-SETZUNG
 ### =================================================================
 
-@baseUrl = http://192.168.1.202:3000
+@baseUrl = http://192.168.1.200:3000
 @adminKey = MASTER_ADMIN_2026
 @newSupplierKey = SUPPLIER_B_TOKEN_99
 @newSupplierName = Lieferant_B
@@ -111,3 +111,11 @@ Content-Type: application/json
 ### -----------------------------------------------------------------
 POST {{baseUrl}}/api/admin/final-checkout/{{newSupplierName}}/{{deliveryId}}
 x-api-key: {{adminKey}}
+
+app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, res) => {
+
+
+###
+GET {{baseUrl}}/api/supplier/{{newSupplierName}}/audit/{{deliveryId}}
+x-api-key: {{newSupplierKey}}
+Content-Type: application/json
