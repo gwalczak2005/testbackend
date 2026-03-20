@@ -1,94 +1,108 @@
 const axios = require('axios');
-
-// Falls dein Server auf einer anderen IP läuft, hier anpassen (z.B. 192.168.1.200)
 const BASE_URL = 'http://localhost:3000'; 
 const ADMIN_KEY = 'MASTER_ADMIN_2026';
 
 const SEED_CONFIG = {
     suppliers: [
-        { name: 'Logistik_Pro_A', key: 'KEY_PRO_A' },
-        { name: 'Kühl_Express_B', key: 'KEY_EXPRESS_B' },
-        { name: 'Global_Transport_C', key: 'KEY_TRANS_C' },
-        { name: 'Med_Logistix_D', key: 'KEY_MED_D' },
-        { name: 'Food_Safety_E', key: 'KEY_FOOD_E' }
+        { 
+            name: 'Logistik_Pro_A', 
+            key: 'KEY_PRO_A', 
+            start: { lat: 48.1351, lon: 11.5820 }, // München
+            scenario: 'PERFECT',
+            desc: "Vorzeigelieferant: Konstante 4-5 Grad."
+        },
+        { 
+            name: 'Kühl_Express_B', 
+            key: 'KEY_EXPRESS_B', 
+            start: { lat: 53.5511, lon: 9.9937 },  // Hamburg
+            scenario: 'CRITICAL_SPIKE',
+            desc: "Defekte Tür: Temperatur steigt kurz auf 12 Grad."
+        },
+        { 
+            name: 'Global_Transport_C', 
+            key: 'KEY_TRANS_C', 
+            start: { lat: 52.5095, lon: 13.4288 }, // Berlin (Neu)
+            scenario: 'SLOW_WARMING',
+            desc: "Kühlaggregat schwach: Steigt am Ende auf 10 Grad."
+        },
+        { 
+            name: 'Med_Logistix_D', 
+            key: 'KEY_MED_D', 
+            start: { lat: 50.1109, lon: 8.6821 },  // Frankfurt
+            scenario: 'DEEP_FREEZE',
+            desc: "Fehlsteuerung: Fällt unter 1 Grad."
+        },
+        { 
+            name: 'Food_Safety_E', 
+            key: 'KEY_FOOD_E', 
+            start: { lat: 48.7758, lon: 9.1829 },  // Stuttgart
+            scenario: 'HUMIDITY_ALARM',
+            desc: "Wasserschaden: Luftfeuchtigkeit springt auf 90%."
+        }
     ],
-    deliveriesPerSupplier: 1,
-    readingsPerDelivery: 5
+    target: { lat: 49.5209, lon: 8.4267 }, // Ziel: BASF Ludwigshafen (Neu)
+    readingsPerDelivery: 50
 };
+
+function getScenarioData(scenario, step, totalSteps) {
+    let temp = 5.0;
+    let hum = 50.0;
+    switch(scenario) {
+        case 'PERFECT': temp = 4.5 + Math.random(); break;
+        case 'CRITICAL_SPIKE': temp = (step > 20 && step < 30) ? 12.5 : 4.5; break;
+        case 'SLOW_WARMING': temp = 4 + (7 * (step / totalSteps)); break;
+        case 'DEEP_FREEZE': temp = (step > 25) ? 0.5 : 4.0; break;
+        case 'HUMIDITY_ALARM': temp = 5.0; hum = (step > 35) ? 92.0 : 50.0; break;
+    }
+    return { temperature: parseFloat(temp.toFixed(2)), humidity: parseFloat(hum.toFixed(2)) };
+}
 
 async function runSeed() {
     try {
-        console.log("🚀 Starte automatisiertes Seeding basierend auf Workflow...");
+        console.log("🚀 Starte Seeding Richtung Ludwigshafen...");
 
         for (const s of SEED_CONFIG.suppliers) {
-            console.log(`\n--- Bearbeite Supplier: ${s.name} ---`);
+            console.log(`\n📦 Profil: ${s.name} (${s.scenario})`);
 
-            // SCHRITT 1: Lieferant im System aufnehmen (ADMIN-AKTION)
-            console.log(`👤 Onboarding Supplier...`);
-            await axios.post(`${BASE_URL}/api/admin/onboard-supplier`, {
-                supplierName: s.name,
-                password: 'start123',
-                apiKey: s.key
-            }, { headers: { 'x-api-key': ADMIN_KEY } });
+            // 1. Onboard Supplier
+            await axios.post(`${BASE_URL}/api/admin/onboard-supplier`, 
+                { supplierName: s.name, password: '123', apiKey: s.key }, 
+                { headers: { 'x-api-key': ADMIN_KEY } });
 
-            for (let d = 1; d <= SEED_CONFIG.deliveriesPerSupplier; d++) {
-                const deliveryId = `DEL-${s.name}-${d}`;
-                const sensorHardwareId = `ESP-${s.name}-${d}`;
+            const deliveryId = `DEL-${s.name}-1`;
+            const sensorId = `ESP-${s.name}-1`;
 
-                // SCHRITT 2: Lieferung registrieren (SUPPLIER-AKTION)
-                console.log(`📦 Registriere Lieferung: ${deliveryId}`);
-                await axios.post(`${BASE_URL}/api/supplier/onboard`, {
-                    hardwareId: sensorHardwareId, // Korrekt: hardwareId laut deinem .http Script
-                    deliveryId: deliveryId
-                }, { headers: { 'x-api-key': s.key } });
+            // 2. Onboard Delivery
+            await axios.post(`${BASE_URL}/api/supplier/onboard`, 
+                { hardwareId: sensorId, deliveryId }, 
+                { headers: { 'x-api-key': s.key } });
 
-                // SCHRITT 3: Grenzwerte versiegeln (SUPPLIER-AKTION)
-                console.log(`⚖️ Setze Grenzwerte für ${deliveryId}...`);
-                await axios.post(`${BASE_URL}/api/supplier/set-limit/${deliveryId}`, {
-                    maxTemp: 8.0,
-                    minTemp: 2.0,
-                    maxHum: 60.0,
-                    minHum: 40.0
-                }, { headers: { 'x-api-key': s.key } });
+            // 3. Set Limits
+            await axios.post(`${BASE_URL}/api/supplier/set-limit/${deliveryId}`, 
+                { maxTemp: 8.0, minTemp: 2.0, maxHum: 70.0, minHum: 30.0 }, 
+                { headers: { 'x-api-key': s.key } });
 
-                // SCHRITT 4: Sensordaten einspeisen (ESP-SIMULATION)
-                for (let r = 1; r <= SEED_CONFIG.readingsPerDelivery; r++) {
-                    const payload = {
-                        sensorId: sensorHardwareId, // Laut deinem .http Schritt 4 ist es sensorId
-                        temperature: parseFloat((4 + Math.random() * 2).toFixed(2)),
-                        humidity: parseFloat((45 + Math.random() * 5).toFixed(2)),
-                        lat: 52.5200,
-                        lon: 13.4050,
-                        timestamp: new Date().toISOString()
-                    };
+            // 4. Generate 50 Readings along the route
+            for (let r = 0; r < SEED_CONFIG.readingsPerDelivery; r++) {
+                const progress = r / (SEED_CONFIG.readingsPerDelivery - 1);
+                const data = getScenarioData(s.scenario, r, SEED_CONFIG.readingsPerDelivery);
+                
+                // Route Calculation
+                const currentLat = s.start.lat + (SEED_CONFIG.target.lat - s.start.lat) * progress;
+                const currentLon = s.start.lon + (SEED_CONFIG.target.lon - s.start.lon) * progress;
 
-                    console.log(`📡 Sende Messwert ${r}/${SEED_CONFIG.readingsPerDelivery} für ${deliveryId}`);
-                    await axios.post(`${BASE_URL}/api/buffer`, payload, { 
-                        headers: { 'x-api-key': s.key } 
-                    });
-                    
-                    await new Promise(res => setTimeout(res, 100));
-                }
+                const payload = {
+                    sensorId: sensorId,
+                    temperature: data.temperature,
+                    humidity: data.humidity,
+                    lat: parseFloat(currentLat.toFixed(4)),
+                    lon: parseFloat(currentLon.toFixed(4)),
+                    timestamp: new Date().toISOString()
+                };
 
-                // SCHRITT 8: Erhalt bestätigen (ADMIN-AKTION)
-                console.log(`🤝 Bestätige Erhalt...`);
-                await axios.post(`${BASE_URL}/api/admin/confirm-receipt/${s.name}/${deliveryId}`, {
-                    recipientName: "Zentrallager Automatik"
-                }, { headers: { 'x-api-key': ADMIN_KEY } });
-
-                // SCHRITT 9: Lieferung finalisieren (ADMIN-AKTION)
-                console.log(`🏁 Finaler Checkout für ${deliveryId}...`);
-                await axios.post(`${BASE_URL}/api/admin/final-checkout/${s.name}/${deliveryId}`, 
-                    {}, { headers: { 'x-api-key': ADMIN_KEY } }
-                );
+                await axios.post(`${BASE_URL}/api/buffer`, payload, { headers: { 'x-api-key': s.key } });
+                if (r % 10 === 0) console.log(`  ... ${r} Messwerte gesendet`);
             }
-        }
-
-        console.log("\n✅ Seeding erfolgreich beendet! Alle 5 Supplier und Lieferungen sind im System.");
-    } catch (error) {
-        const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
-        console.error("❌ Fehler beim Seeding:", errorMsg);
-    }
-}
-
-runSeed();
+            
+            // 5. Finalize
+            await axios.post(`${BASE_URL}/api/admin/
