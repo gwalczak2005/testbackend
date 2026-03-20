@@ -172,7 +172,6 @@ async function generateQualityReport(deliveryId, auditSummary) {
 
 // Authentifikation-Middleware
 const supplierAuth = (req, res, next) => {
-    console.log("Eingehende Header:", req.headers); // Füge das hier ein
     const apiKey = req.headers['x-api-key'] || req.query.apiKey;
     const requestedSupplier = req.params.supplier;
 

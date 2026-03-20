@@ -105,4 +105,17 @@ async function runSeed() {
             }
             
             // 5. Finalize
-            await axios.post(`${BASE_URL}/api/admin/
+            await axios.post(`${BASE_URL}/api/admin/confirm-receipt/${s.name}/${deliveryId}`, 
+                { recipientName: "BASF Ludwigshafen" }, { headers: { 'x-api-key': ADMIN_KEY } });
+            await axios.post(`${BASE_URL}/api/admin/final-checkout/${s.name}/${deliveryId}`, 
+                {}, { headers: { 'x-api-key': ADMIN_KEY } });
+            
+            console.log(`✅ ${s.name} erfolgreich abgeschlossen.`);
+        }
+        console.log("\n✨ Seeding beendet. Die Daten für das BASF-Zentrallager sind bereit.");
+    } catch (e) { 
+        console.error("❌ Fehler:", e.response ? JSON.stringify(error.response.data) : e.message); 
+    }
+}
+
+runSeed();
