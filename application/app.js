@@ -27,6 +27,26 @@ let contract;
 let client; //gRPC Client global halten, um bei Bedarf zu schließen
 let messageCounter = 0;
 
+// Funktion zum Löschen alter Reports (älter als 7 Tage)
+function cleanupOldReports() {
+    const directory = './reports';
+    const msInDay = 24 * 60 * 60 * 1000;
+
+    fs.readdir(directory, (err, files) => {
+        if (err) return;
+        files.forEach(file => {
+            const filePath = path.join(directory, file);
+            const stats = fs.statSync(filePath);
+            if (Date.now() - stats.mtimeMs > 7 * msInDay) {
+                fs.unlinkSync(filePath);
+                console.log(`🗑️ Alter Report gelöscht: ${file}`);
+            }
+        });
+    });
+}
+
+// Beim Start ausführen
+cleanupOldReports();
 
 // --- HYPERLEDGER FUNKTIONEN ---
 async function initBlockchain() {
