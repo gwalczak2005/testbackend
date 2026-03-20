@@ -119,3 +119,9 @@ app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, r
 GET {{baseUrl}}/api/supplier/{{newSupplierName}}/audit/{{deliveryId}}
 x-api-key: {{newSupplierKey}}
 Content-Type: application/json
+
+### SCHRITT 10a: Report Download (ADMIN-Sicht)
+# Ersetze {{deliveryId}} durch eine ID, die bereits im Status 'CLOSED' ist
+GET {{baseUrl}}/api/admin/download-report/SHIP-2026-B-TEST
+x-api-key: MASTER_ADMIN_2026
+Content-Type: application/json

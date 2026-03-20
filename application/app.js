@@ -1,3 +1,4 @@
+// VARIABLEN, PFADE, KONSTANTEN
 const express = require('express');
 const grpc = require('@grpc/grpc-js');
 const { connect, signers } = require('@hyperledger/fabric-gateway');
@@ -6,28 +7,25 @@ const path = require('path');
 const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-let gateway;
-let contract;
-let client; //gRPC Client global halten, um bei Bedarf zu schließen
-
-const app = express();
-app.use(express.json());
-
-// --- VARIABLEN & PFADE ---
-let messageCounter = 0;
-const port = 3000;
+const PDFDocument = require('pdfkit');
 
 const walletPath = path.resolve(__dirname, 'wallet', 'org1-admin');
 const certPath = path.join(walletPath, 'msp', 'signcerts', 'cert.pem');
 const keyDirectoryPath = path.join(walletPath, 'msp', 'keystore');
 const tlsCertPath = path.join(walletPath, 'tls', 'ca.crt');
-
-//Schlüssel-Datenbank 
-const API_KEYS = {
+const port = 3000;
+const API_KEYS = {                                                          //Schlüssel-Datenbank
     "DEIN_ADMIN_MASTER_KEY": { role: "ADMIN", owner: "Großunternehmen" },
     "KEY_SUPPLIER_A": { role: "SUPPLIER", owner: "Supplier_A" }
 };
+
+const app = express();
+app.use(express.json());
+
+let gateway;
+let contract;
+let client; //gRPC Client global halten, um bei Bedarf zu schließen
+let messageCounter = 0;
 
 
 // --- HYPERLEDGER FUNKTIONEN ---
@@ -126,8 +124,35 @@ async function syncToBlockchain(logId, sensorData, mapping) {
     } // <-- Schließt den catch-Block
 }
 
+async function generateQualityReport(deliveryId, auditSummary) {
+    const doc = new PDFDocument();
+    const fileName = `Report_${deliveryId}.pdf`;
+    const filePath = path.join(__dirname, 'reports', fileName);
+
+    // Sicherstellen, dass der Ordner existiert
+    if (!fs.existsSync('./reports')) fs.mkdirSync('./reports');
+
+    doc.pipe(fs.createWriteStream(filePath));
+
+    // PDF Inhalt
+    doc.fontSize(20).text('QUALITÄTS-ZERTIFIKAT: KÜHLKETTE', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12).text(`Lieferungs-ID: ${deliveryId}`);
+    doc.text(`Datum: ${new Date().toLocaleString()}`);
+    doc.moveDown();
+    doc.text(`Blockchain-Status: VERSIEGELT (Hyperledger Fabric)`);
+    doc.text(`Integritäts-Prüfung: ${auditSummary.status}`);
+    doc.moveDown();
+    doc.text(`Anzahl Messpunkte (Blockchain): ${auditSummary.blockchainTotal}`);
+    doc.text(`Warnungen/Alarme: ${auditSummary.anomaliesDetected}`);
+    
+    doc.end();
+    return filePath;
+}
+
 // Authentifikation-Middleware
 const supplierAuth = (req, res, next) => {
+    console.log("Eingehende Header:", req.headers); // Füge das hier ein
     const apiKey = req.headers['x-api-key'] || req.query.apiKey;
     const requestedSupplier = req.params.supplier;
 
@@ -228,6 +253,16 @@ db.serialize(() => {
             db.run(insertAdmin, ['SUPPLIER_A_KEY', 'SUPPLIER', 'Supplier_A']);
         }
     });
+
+    // 4. Delivery Reports Tabelle
+    db.run(`CREATE TABLE IF NOT EXISTS delivery_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    delivery_id TEXT UNIQUE,
+    pdf_path TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    integrity_status TEXT
+    )`);
+    console.log("DB-Schema initialisiert")
 });
 
 
@@ -512,18 +547,44 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
     try {
         if (!contract) await initBlockchain();
         
-        // Blockchain-Versiegelung: Status wird auf 'CLOSED' gesetzt
+        // 1. Blockchain-Versiegelung
         await contract.submitTransaction('FinalizeDelivery', supplier, deliveryId);
         
-        // ARCHIVIERUNG: Hardware wird deaktiviert (is_active = 0) und kann neu vergeben werden
-        db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId], (err) => {
-            if (err) return res.status(500).json({ error: "DB-Fehler bei Archivierung: " + err.message });
-            
-            res.json({ 
-                status: "Success", 
-                message: `Lieferung ${deliveryId} versiegelt. Sensor ist nun wieder frei für neue Aufgaben.` 
+        // 2. PDF-Erzeugung
+        const fileName = `Report_${deliveryId}.pdf`;
+        const filePath = path.join(__dirname, 'reports', fileName);
+        const doc = new PDFDocument();
+        
+        if (!fs.existsSync('./reports')) fs.mkdirSync('./reports');
+        
+        const writeStream = fs.createWriteStream(filePath);
+        doc.pipe(writeStream);
+        doc.fontSize(20).text('ABNAHMEPROTOKOLL', { align: 'center' });
+        doc.text(`Lieferung: ${deliveryId}`);
+        doc.text(`Status: Blockchain-verifiziert`);
+        doc.end();
+
+        // 3. WICHTIG: Erst wenn die Datei fertig geschrieben ist, DB updaten
+        writeStream.on('finish', () => {
+            db.serialize(() => {
+                // Mapping deaktivieren
+                db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId]);
+
+                // DEN PFAD REGISTRIEREN (Das hat gefehlt!)
+                db.run(`INSERT OR REPLACE INTO delivery_reports (delivery_id, pdf_path, integrity_status) 
+                        VALUES (?, ?, ?)`, [deliveryId, filePath, 'VERIFIED'], (err) => {
+                    
+                    if (err) return res.status(500).json({ error: "DB-Fehler bei Report-Eintrag: " + err.message });
+                    
+                    res.json({ 
+                        status: "Success", 
+                        message: `Lieferung ${deliveryId} versiegelt und Report generiert.`,
+                        downloadUrl: `/api/admin/download-report/${deliveryId}` 
+                    });
+                });
             });
         });
+
     } catch (error) { 
         res.status(500).json({ error: "Blockchain Fehler: " + error.message }); 
     }
@@ -658,6 +719,26 @@ app.post('/api/admin/onboard-supplier', supplierAuth, async (req, res) => {
     });
 });
 
+// 2.9 Zertifikat/Report wird via API heruntergeladen
+app.get('/api/admin/download-report/:deliveryId', supplierAuth, (req, res) => {
+    // Sicherheitscheck: Nur ADMIN Rolle erlaubt
+    if (req.user.role !== 'ADMIN') {
+        return res.status(403).json({ error: "Nur Administratoren können globale Reports abrufen." });
+    }
+
+    const { deliveryId } = req.params;
+
+    db.get("SELECT pdf_path FROM delivery_reports WHERE delivery_id = ?", [deliveryId], (err, row) => {
+        if (err || !row) return res.status(404).json({ error: "Report nicht gefunden." });
+
+        const filePath = path.resolve(row.pdf_path);
+        if (fs.existsSync(filePath)) {
+            res.download(filePath);
+        } else {
+            res.status(404).json({ error: "PDF-Datei existiert nicht auf dem Server." });
+        }
+    });
+});
 // ==========================================
 // 3. Supplier Area (/api/supplier)
 // ==========================================
@@ -924,6 +1005,34 @@ app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) =
         console.error("❌ Kritischer Fehler bei SetLimit:", error.message);
         res.status(500).json({ error: error.message }); 
     }
+});
+
+// 3.7 Supplier kann Report/Zertifikat der Lieferung via API herunterladen
+app.get('/api/supplier/download-report/:deliveryId', supplierAuth, (req, res) => {
+    const { deliveryId } = req.params;
+    const supplierName = req.user.owner; 
+
+    // 1. Validierung: Gehört diese Lieferung diesem Supplier?
+    const checkOwnership = `SELECT delivery_id FROM hardware_mappings 
+                            WHERE delivery_id = ? AND supplier_name = ?`;
+
+    db.get(checkOwnership, [deliveryId, supplierName], (err, mapping) => {
+        if (err || !mapping) {
+            // Wichtig: 403, wenn die ID existiert, aber nicht dem Supplier gehört
+            return res.status(403).json({ error: "Zugriff verweigert." });
+        }
+
+        db.get("SELECT pdf_path FROM delivery_reports WHERE delivery_id = ?", [deliveryId], (err, report) => {
+            if (err || !report) return res.status(404).json({ error: "Report nicht gefunden." });
+
+            const filePath = path.resolve(report.pdf_path);
+            if (fs.existsSync(filePath)) {
+                res.download(filePath); // Der Browser startet automatisch den Download
+            } else {
+                res.status(404).json({ error: "Datei auf Server nicht auffindbar." });
+            }
+        });
+    });
 });
 
 // ==========================================
