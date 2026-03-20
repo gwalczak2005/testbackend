@@ -2,7 +2,7 @@ POST http://localhost:3000/api/admin/onboard-sensor
 Content-Type: application/json
 
 {
-    "sensorId": "ESP_999",
+    "sensorId": "ESP_001",
     "supplier": "Lieferant1",
-    "delivery": "SHIP-2026-004"
+    "delivery": "SHIP-2026-001"
 }
