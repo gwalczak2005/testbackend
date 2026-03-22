@@ -604,7 +604,8 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
             doc.pipe(writeStream);
 
             // --- HEADER ---
-            doc.image('basf_logo.png', 50, 45, { width: 60 }); // Falls Logo vorhanden
+            const logoPath = path.join(__dirname, '..', 'basf_logo.png');
+            if (fs.existsSync(logoPath)) doc.image(logoPath, 50, 45, { width: 60 });
             doc.fillColor('#00417F').fontSize(20).text('Lieferungsnachweiszertifikat', 120, 50, { align: 'right' });
             doc.fontSize(10).fillColor('#000').text(`Zertifikats-ID: ${deliveryId}`, { align: 'right' });
             doc.moveDown(1.5);
