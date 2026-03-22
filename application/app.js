@@ -516,30 +516,8 @@ app.get('/api/admin/audit/:supplier/:deliveryId', supplierAuth, async (req, res)
 // 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
 app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
-    const { recipientName } = req.body; // Das Großunternehmen
-
-    try {
-        if (!contract) await initBlockchain();
-        
-        // 1. Unveränderlicher Eintrag auf der Blockchain
-        await contract.submitTransaction('ConfirmDelivery', supplier, deliveryId, recipientName);
-        
-        // 2. SQL Status ändern, aber NOCH NICHT deaktivieren
-        db.run(`UPDATE hardware_mappings SET status = 'DELIVERED' WHERE delivery_id = ?`, [deliveryId], (err) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ 
-                status: "Success", 
-                message: `Erhalt von ${deliveryId} durch ${recipientName} bestätigt. Warte auf Checkout durch Lieferant.` 
-            });
-        });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
-app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async (req, res) => {
-    const { supplier, deliveryId } = req.params;
     // Fallback sorgt für Stabilität
-    const recipientName = req.body.recipientName || "Zentrallager Berlin"; 
+    const recipientName = req.body.recipientName || "Zentrallager BASF Ludwigshafen"; 
 
     try {
         if (!contract) await initBlockchain();
@@ -591,9 +569,7 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
 
             // 3. QR-CODE GENERIEREN
             // Erstellt einen Link zur Audit-Ansicht für den Browser
-            const auditUrl = `http://${req.get('host')}/api/supplier/${supplier}/audit/${deliveryId}?apiKey=${req.user.apiKey}`;
-            const qrCodeDataUrl = await QRCode.toDataURL(auditUrl);
-
+            const auditUrl = `http://${req.get('host')}/api/supplier/${supplier}/audit/${deliveryId}?apiKey=${req.user.api_key}`;
             // 4. PDF-ERZEUGUNG
             const fileName = `Report_${deliveryId}.pdf`;
             const filePath = path.join(__dirname, 'reports', fileName);
