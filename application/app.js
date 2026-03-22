@@ -1013,7 +1013,7 @@ app.post('/api/supplier/onboard', supplierAuth, async (req, res) => {
         
         try {
             // Blockchain: Registrierung des logistischen Vorgangs
-            await contract.submitTransaction('InitializeDelivery', deliveryId, supplierName, uniqueSensorId);
+            await contract.submitTransaction('InitializeDelivery', supplierName, deliveryId, uniqueSensorId);
             
             res.json({ 
                 status: "Success", 
