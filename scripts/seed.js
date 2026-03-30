@@ -114,7 +114,7 @@ async function runSeed() {
         }
         console.log("\n✨ Seeding beendet. Die Daten für das BASF-Zentrallager sind bereit.");
     } catch (e) { 
-        console.error("❌ Fehler:", e.response ? JSON.stringify(error.response.data) : e.message); 
+        console.error("❌ Fehler:", e.response ? JSON.stringify(e.response.data) : e.message);
     }
 }
 

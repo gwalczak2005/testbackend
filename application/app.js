@@ -312,7 +312,18 @@ app.get('/api/dev/debug-mappings', (req, res) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
-}); // <--- Diese Klammern haben gefehlt!
+}); 
+
+app.get('/api/dev/health', async (req, res) => {
+    if (!contract) {
+        await initBlockchain();
+    }
+    if (contract) {
+        res.status(200).json({ status: "ready", blockchain: "connected" });
+    } else {
+        res.status(503).json({ status: "not ready", blockchain: "disconnected" });
+    }
+});
 
 // --- SENSOR DATA BUFFER (Schnittstelle für ESP8266)
 app.post('/api/buffer', supplierAuth, (req, res) => {

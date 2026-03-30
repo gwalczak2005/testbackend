@@ -20,6 +20,7 @@ docker network prune -f
 # 3. Wallet zurücksetzen
 echo "Lösche altes Wallet..."
 rm -rf $APP_WALLET/*
+rm -f $DB_PATH
 
 # 4. Netzwerk neu starten
 echo "Starte Netzwerk und erstelle Channel..."

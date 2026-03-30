@@ -27,12 +27,12 @@ MAX_RETRIES=20
 COUNT=0
 
 # Loop: Prüfe alle 2 Sekunden, ob der Port 3000 antwortet
-while ! curl -s http://127.0.0.1:3000 > /dev/null; do
+while ! curl -sf http://127.0.0.1:3000/api/dev/health > /dev/null; do
     echo -n "."
     sleep 2
     COUNT=$((COUNT+1))
     if [ $COUNT -ge $MAX_RETRIES ]; then
-        echo -e "\n❌ FEHLER: Backend startet nicht! Prüfe die Logs mit: tail -n 20 $LOG_FILE"
+        echo -e "\n❌ FEHLER: Blockchain nicht erreichbar! Prüfe die Logs mit: tail -n 20 $LOG_FILE"
         kill $BACKEND_PID 2>/dev/null
         exit 1
     fi
