@@ -624,7 +624,7 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
         doc.fillColor('#000').fontSize(12).text('Digitales Audit-Verfahren', 50, qrY, { underline: true });
         doc.fontSize(9).text('Dieser Bericht ist durch einen kryptografischen Hash geschützt.', 50, qrY + 20, { width: 320 });
         doc.image(qrCodeDataUrl, 400, qrY, { width: 100 });
-
+        doc.fontSize(8).fillColor('#999').text('Automatisierte Blockchain-Verifizierung', 50, 700, { align: 'center' });
         doc.end();
 
         // 5. ABSCHLUSS NACH DEM SCHREIBEN

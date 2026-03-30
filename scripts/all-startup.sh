@@ -53,7 +53,7 @@ done
 
 echo -e "\n System ist ONLINE (PID: $BACKEND_PID)"
 echo "gRPC-Stabilisierung"
-sleep 30
+sleep 10
 
 # 5. Seeding ausführen
 echo "--------------------------------------------------"
