@@ -6,3 +6,7 @@ Content-Type: application/json
     "supplier": "Lieferant1",
     "delivery": "SHIP-2026-001"
 }
+
+
+GET http://localhost:3000/api/dev/health
+Content-Type: application/json

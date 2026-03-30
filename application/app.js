@@ -524,7 +524,7 @@ app.get('/api/admin/audit/:supplier/:deliveryId', supplierAuth, async (req, res)
     }
 });
 
-// 2.5 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
+// 2.4 PROOF-OF-DELIVERY (Empfänger bestätigt Erhalt)
 app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
     // Fallback sorgt für Stabilität
@@ -549,17 +549,16 @@ app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async
     }
 });
 
-// 2.5b FINAL CHECKOUT (Lieferant bestätigt Daten & schließt ab)
+// 2.5 FINAL CHECKOUT (Lieferant bestätigt Daten & schließt ab)
 app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async (req, res) => {
     const { supplier, deliveryId } = req.params;
 
     try {
+        // 1. BLOCKCHAIN-VERBINDUNG & TRANSAKTION
         if (!contract) await initBlockchain();
-
-        // 1. BLOCKCHAIN-AKTION: Status verriegeln
         await contract.submitTransaction('FinalizeDelivery', supplier, deliveryId);
 
-        // 2. DATEN FÜR PDF SAMMELN (Startzeit, Endzeit und Alarme)
+        // 2. DATEN AUS SQL HOLEN (Wir wandeln db.get in ein Promise um, für sauberes async/await)
         const statsQuery = `
             SELECT 
                 MIN(l.timestamp) as start_time, 
@@ -569,94 +568,85 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
             JOIN hardware_mappings m ON l.sensor_id = m.sensor_id
             WHERE m.delivery_id = ? AND m.is_active = 1`;
 
-        db.get(statsQuery, [deliveryId], async (err, stats) => {
-            if (err) {
-                    console.error("SQL Fehler:", err.message); // Hilft beim Debuggen im Terminal
-                    return res.status(500).json({ error: "Fehler beim Datenabruf für Report: " + err.message });
-            }
-            // Fallback, falls keine Daten vorhanden sind (verhindert PDF-Absturz)
-            const startTime = stats.start_time || "Keine Daten";
-            const alarmCount = stats.alarm_count || 0;
+        const stats = await new Promise((resolve, reject) => {
+            db.get(statsQuery, [deliveryId], (err, row) => {
+                if (err) reject(err);
+                else resolve(row || { start_time: null, end_time: null, alarm_count: 0 });
+            });
+        });
 
-            // 3. QR-CODE GENERIEREN
-            // Erstellt einen Link zur Audit-Ansicht für den Browser
-            const auditUrl = `http://${req.get('host')}/api/supplier/${supplier}/audit/${deliveryId}?apiKey=${req.user.api_key}`;
-            // 4. PDF-ERZEUGUNG
-            const fileName = `Report_${deliveryId}.pdf`;
-            const filePath = path.join(__dirname, 'reports', fileName);
-            if (!fs.existsSync('./reports')) fs.mkdirSync('./reports');
+        // 3. QR-CODE GENERIEREN
+        const auditUrl = `http://${req.get('host')}/api/supplier/${supplier}/audit/${deliveryId}?apiKey=${req.user.api_key}`;
+        const qrCodeDataUrl = await QRCode.toDataURL(auditUrl);
 
-            const doc = new PDFDocument({ margin: 50 });
-            const writeStream = fs.createWriteStream(filePath);
-            doc.pipe(writeStream);
+        // 4. PDF-ERZEUGUNG VORBEREITEN
+        const fileName = `Report_${deliveryId}.pdf`;
+        const reportsDir = path.join(__dirname, 'reports');
+        const filePath = path.join(reportsDir, fileName);
+        
+        if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir);
 
-            // --- HEADER ---
-            const logoPath = path.join(__dirname, '..', 'basf_logo.png');
-            if (fs.existsSync(logoPath)) doc.image(logoPath, 50, 45, { width: 60 });
-            doc.fillColor('#00417F').fontSize(20).text('Lieferungsnachweiszertifikat', 120, 50, { align: 'right' });
-            doc.fontSize(10).fillColor('#000').text(`Zertifikats-ID: ${deliveryId}`, { align: 'right' });
-            doc.moveDown(1.5);
-            doc.path('M 50 100 L 550 100').stroke('#00417F'); // Trennlinie
+        const doc = new PDFDocument({ margin: 50 });
+        const writeStream = fs.createWriteStream(filePath);
+        doc.pipe(writeStream);
 
-            // --- ECKDATEN (SUMMARY) ---
-            doc.moveDown(2);
-            doc.fontSize(12).fillColor('#444').text('Transport-Zusammenfassung', { underline: true });
-            doc.moveDown(0.5);
-            doc.fontSize(10).fillColor('#000');
-            doc.text(`Logistik-Partner:    ${supplier}`);
-            doc.text(`Zustellung an:       BASF Zentrallager Ludwigshafen`);
-            doc.text(`Start-Zeitpunkt:     ${stats.start_time || 'N/A'}`);
-            doc.text(`Abschluss-Zeit:      ${new Date().toLocaleString('de-DE')}`);
-            doc.text(`Status:              SICHER VERSIEGELT`);
+        // --- PDF CONTENT ---
+        const logoPath = path.join(__dirname, '..', 'basf_logo.png');
+        if (fs.existsSync(logoPath)) doc.image(logoPath, 50, 45, { width: 60 });
+        
+        doc.fillColor('#00417F').fontSize(20).text('Lieferungsnachweiszertifikat', 120, 50, { align: 'right' });
+        doc.fontSize(10).fillColor('#000').text(`Zertifikats-ID: ${deliveryId}`, { align: 'right' });
+        doc.moveDown(1.5);
+        doc.path('M 50 100 L 550 100').stroke('#00417F'); 
 
-            // --- ALARM-ÜBERSICHT (MITTIG) ---
-            doc.moveDown(4);
-            doc.rect(50, doc.y, 500, 25).fill('#f2f2f2');
-            doc.fillColor('#00417F').text('Compliance Audit', 55, doc.y - 18);
-            doc.moveDown(1.5);
+        doc.moveDown(2);
+        doc.fontSize(12).fillColor('#444').text('Transport-Zusammenfassung', { underline: true });
+        doc.fontSize(10).fillColor('#000');
+        doc.text(`Logistik-Partner:    ${supplier}`);
+        doc.text(`Zustellung an:       BASF Zentrallager Ludwigshafen`);
+        doc.text(`Start-Zeitpunkt:     ${stats.start_time || 'N/A'}`);
+        doc.text(`Abschluss-Zeit:      ${new Date().toLocaleString('de-DE')}`);
+        doc.text(`Status:              SICHER VERSIEGELT`);
 
-            if (!stats.alarm_count || stats.alarm_count === 0) {
-                doc.fillColor('green').fontSize(12).text('KONFORM: Alle Grenzwerte wurden lückenlos eingehalten.', { align: 'center' });
-            } else {
-                doc.fillColor('red').fontSize(12).text(`DISKREPANZ: ${stats.alarm_count} Grenzwert-Überschreitungen registriert.`, { align: 'center' });
-            }
+        doc.moveDown(4);
+        doc.rect(50, doc.y, 500, 25).fill('#f2f2f2');
+        doc.fillColor('#00417F').text('Compliance Audit', 55, doc.y - 18);
+        doc.moveDown(1.5);
 
-            // --- QR-CODE & AUDIT ---
-            doc.moveDown(3);
-            const qrY = doc.y;
-            doc.fillColor('#000').fontSize(12).text('Digitales Audit-Verfahren', 50, qrY, { underline: true });
-            doc.fontSize(9).text('Dieser Bericht ist durch einen kryptografischen Hash auf dem Hyperledger Fabric Ledger geschützt. Scannen Sie den QR-Code, um die lückenlose Historie einzusehen.', 50, qrY + 20, { width: 320 });
-            doc.image(qrCodeDataUrl, 400, qrY, { width: 100 });
+        if (stats.alarm_count === 0) {
+            doc.fillColor('green').fontSize(12).text('KONFORM: Alle Grenzwerte wurden lückenlos eingehalten.', { align: 'center' });
+        } else {
+            doc.fillColor('red').fontSize(12).text(`DISKREPANZ: ${stats.alarm_count} Grenzwert-Überschreitungen registriert.`, { align: 'center' });
+        }
 
-            // --- FOOTER ---
-            doc.fontSize(8).fillColor('#999').text('BASF Digital Logistics Framework - Automatisierte Blockchain-Verifizierung - Ohne Unterschrift gültig.', 50, 700, { align: 'center' });
+        doc.moveDown(3);
+        const qrY = doc.y;
+        doc.fillColor('#000').fontSize(12).text('Digitales Audit-Verfahren', 50, qrY, { underline: true });
+        doc.fontSize(9).text('Dieser Bericht ist durch einen kryptografischen Hash geschützt.', 50, qrY + 20, { width: 320 });
+        doc.image(qrCodeDataUrl, 400, qrY, { width: 100 });
 
-            doc.end();
+        doc.end();
 
-            // 5. ABSCHLUSS: DB-Status & Registrierung
-            writeStream.on('finish', () => {
-                db.serialize(() => {
-                    // Status auf CLOSED setzen
-                    db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId]);
-
-                    // PDF-Pfad registrieren
-                    db.run(`INSERT OR REPLACE INTO delivery_reports (delivery_id, pdf_path, integrity_status) 
-                            VALUES (?, ?, ?)`, [deliveryId, filePath, stats.alarm_count > 0 ? 'ALARM_LOGGED' : 'VERIFIED'], (err) => {
-                        
-                        if (err) return res.status(500).json({ error: "DB-Fehler bei Report-Eintrag" });
-                        
-                        res.json({ 
-                            status: "Success", 
-                            message: `Report für ${deliveryId} wurde generiert.`,
-                            downloadUrl: `/api/admin/download-report/${deliveryId}` 
-                        });
+        // 5. ABSCHLUSS NACH DEM SCHREIBEN
+        writeStream.on('finish', () => {
+            db.serialize(() => {
+                db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId]);
+                db.run(`INSERT OR REPLACE INTO delivery_reports (delivery_id, pdf_path, integrity_status) 
+                        VALUES (?, ?, ?)`, [deliveryId, filePath, stats.alarm_count > 0 ? 'ALARM_LOGGED' : 'VERIFIED'], (err) => {
+                    if (err) return res.status(500).json({ error: "DB-Fehler bei Report-Eintrag" });
+                    
+                    res.json({ 
+                        status: "Success", 
+                        message: `Report für ${deliveryId} generiert.`,
+                        downloadUrl: `/api/admin/download-report/${deliveryId}` 
                     });
                 });
             });
         });
 
-    } catch (error) { 
-        res.status(500).json({ error: "Blockchain Fehler: " + error.message }); 
+    } catch (err) {
+        console.error("❌ Fehler im Final Checkout:", err);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
     }
 });
 

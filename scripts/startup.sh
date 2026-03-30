@@ -22,6 +22,10 @@ echo "Lösche altes Wallet..."
 rm -rf $APP_WALLET/*
 rm -f $DB_PATH
 
+# 3.2 DB löschen
+echo "Lösche Datenbank"
+rm -f "/home/wsl/testbackend/application/sensor_data.db"
+
 # 4. Netzwerk neu starten
 echo "Starte Netzwerk und erstelle Channel..."
 ./network.sh up createChannel -c mychannel -ca
