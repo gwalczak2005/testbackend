@@ -5,11 +5,7 @@ const { connect, signers } = require('@hyperledger/fabric-gateway');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const sqlite3 = require('sqlite3').verbose();
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const PDFDocument = require('pdfkit');
-const QRCode = require('qrcode');
-
 const walletPath = path.resolve(__dirname, 'wallet', 'org1-admin');
 const certPath = path.join(walletPath, 'msp', 'signcerts', 'cert.pem');
 const keyDirectoryPath = path.join(walletPath, 'msp', 'keystore');
@@ -20,67 +16,16 @@ const API_KEYS = {                                                          //Sc
     "KEY_SUPPLIER_A": { role: "SUPPLIER", owner: "Supplier_A" }
 };
 
+const FabricService = require('./services/FabricService');
+const { db } = require('./services/DatabaseService');
+const activeContract = FabricService.getContract();
+
+const AuditService = require('./services/AuditService'); //für API Final-Checkout !!
+
 const app = express();
 app.use(express.json());
 
-let gateway;
-let contract;
-let client; //gRPC Client global halten, um bei Bedarf zu schließen
-let messageCounter = 0;
 
-// Funktion zum Löschen alter Reports (älter als 7 Tage)
-function cleanupOldReports() {
-    const directory = './reports';
-    const msInDay = 24 * 60 * 60 * 1000;
-
-    fs.readdir(directory, (err, files) => {
-        if (err) return;
-        files.forEach(file => {
-            const filePath = path.join(directory, file);
-            const stats = fs.statSync(filePath);
-            if (Date.now() - stats.mtimeMs > 7 * msInDay) {
-                fs.unlinkSync(filePath);
-                console.log(`🗑️ Alter Report gelöscht: ${file}`);
-            }
-        });
-    });
-}
-
-// Beim Start ausführen
-cleanupOldReports();
-
-// --- HYPERLEDGER FUNKTIONEN ---
-async function initBlockchain() {
-    try {
-        // Falls bereits eine alte Verbindung besteht, sauber schließen
-        if (gateway) gateway.close();
-        if (client) client.close();
-
-        const tlsRootCert = fs.readFileSync(tlsCertPath);
-        client = new grpc.Client('localhost:7051', grpc.credentials.createSsl(tlsRootCert), {
-            'grpc.keepalive_time_ms': 120000,
-            'grpc.http2.min_time_between_pings_ms': 120000,
-        });
-
-        const files = fs.readdirSync(keyDirectoryPath);
-        const keyFile = files.find(file => file.endsWith('_sk'));
-        const privateKeyPem = fs.readFileSync(path.join(keyDirectoryPath, keyFile));
-
-        gateway = await connect({
-            client,
-            identity: { mspId: 'Org1MSP', credentials: fs.readFileSync(certPath) },
-            signer: signers.newPrivateKeySigner(crypto.createPrivateKey(privateKeyPem)),
-        });
-
-        const network = gateway.getNetwork('mychannel');
-        contract = network.getContract('basic');
-        
-        console.log("✅ Blockchain-Gateway initialisiert.");
-    } catch (error) {
-        console.error("❌ Kritischer Fehler bei Blockchain-Init:", error.message);
-        contract = null; // Signalisiert anderen Funktionen, dass wir offline sind
-    }
-}
 
 // Hilfsfunktion zum Senden an die Blockchain
 async function sendToHyperledger(id, temp, humidity) {
@@ -93,82 +38,6 @@ async function sendToHyperledger(id, temp, humidity) {
             });
         });
     };
-}
-
-// Kapselung der Blockchain
-async function syncToBlockchain(logId, sensorData, mapping) {
-    // 1. Daten extrahieren
-    const { uniqueId, temp, humidity, lat, lon, measurementTime } = sensorData;
-    const { supplier_name, delivery_id } = mapping;
-
-    // 2. Asset-ID generieren
-    const bcAssetId = `LOG-${Math.floor(Date.now() / 1000)}-${logId}`;
-
-    try {
-        // 3. Blockchain-Verbindung prüfen
-        if (!contract) {
-            console.log("🔗 Initialisiere Blockchain-Verbindung für Sync...");
-            await initBlockchain();
-            if (!contract) {
-                throw new Error("Blockchain-Gateway konnte nicht initialisiert werden.");
-            }
-        }
-
-        console.log(`\n🔗 BLOCKCHAIN: Sende validierte Daten für ${supplier_name} (${delivery_id})...`);
-
-        // 4. Transaktion an Hyperledger Fabric übermitteln (10 Parameter)
-        await contract.submitTransaction(
-            'CreateAsset', 
-            bcAssetId, 
-            uniqueId, 
-            temp.toString(), 
-            humidity.toString(),
-            supplier_name, 
-            delivery_id, 
-            measurementTime, 
-            lat ? lat.toString() : "0.0", 
-            lon ? lon.toString() : "0.0"
-        );
-        
-        console.log(`✅ Blockchain-Sync erfolgreich: ${bcAssetId}`);
-        return { success: true, assetId: bcAssetId };
-
-    } catch (error) {
-        console.error(`❌ Blockchain-Sync fehlgeschlagen für ${bcAssetId}:`, error.message);
-        
-        // Bei Verbindungsfehlern contract zurücksetzen
-        if (error.message.includes('14') || error.message.includes('closed') || error.message.includes('unavailable')) {
-            contract = null;
-        }
-        
-        return { success: false, assetId: bcAssetId };
-    } // <-- Schließt den catch-Block
-}
-
-async function generateQualityReport(deliveryId, auditSummary) {
-    const doc = new PDFDocument();
-    const fileName = `Report_${deliveryId}.pdf`;
-    const filePath = path.join(__dirname, 'reports', fileName);
-
-    // Sicherstellen, dass der Ordner existiert
-    if (!fs.existsSync('./reports')) fs.mkdirSync('./reports');
-
-    doc.pipe(fs.createWriteStream(filePath));
-
-    // PDF Inhalt
-    doc.fontSize(20).text('QUALITÄTS-ZERTIFIKAT: KÜHLKETTE', { align: 'center' });
-    doc.moveDown();
-    doc.fontSize(12).text(`Lieferungs-ID: ${deliveryId}`);
-    doc.text(`Datum: ${new Date().toLocaleString()}`);
-    doc.moveDown();
-    doc.text(`Blockchain-Status: VERSIEGELT (Hyperledger Fabric)`);
-    doc.text(`Integritäts-Prüfung: ${auditSummary.status}`);
-    doc.moveDown();
-    doc.text(`Anzahl Messpunkte (Blockchain): ${auditSummary.blockchainTotal}`);
-    doc.text(`Warnungen/Alarme: ${auditSummary.anomaliesDetected}`);
-    
-    doc.end();
-    return filePath;
 }
 
 // Authentifikation-Middleware
@@ -215,78 +84,6 @@ const supplierAuth = (req, res, next) => {
     });
 };
 
-// --- DATENBANK INITIALISIERUNG & SCHEMA ---
-const dbPath = path.resolve(__dirname, 'sensor_data.db');
-const db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-        console.error("Fehler beim Öffnen der DB:", err.message);
-    } else {
-        console.log("✅ SQLite-Datenbank verbunden.");
-    }
-});
-
-db.serialize(() => {
-    // 1. Die Log-Tabelle (Rohdaten) 
-    db.run(`CREATE TABLE IF NOT EXISTS sensor_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sensor_id TEXT,
-        temp REAL,
-        humidity REAL,
-        lat REAL,           -- NEU: Breitengrad
-        lon REAL,           -- NEU: Längengrad
-        is_alarm INTEGER DEFAULT 0,
-        sync_status TEXT DEFAULT 'SYNCED',
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // 2. Mapping-Tabelle
-        db.run(`CREATE TABLE IF NOT EXISTS hardware_mappings (
-        sensor_id TEXT PRIMARY KEY,
-        supplier_name TEXT,
-        delivery_id TEXT,
-        is_active INTEGER DEFAULT 1,
-        status TEXT DEFAULT 'IN_TRANSIT',
-        max_temp REAL DEFAULT 30.0,
-        min_temp REAL DEFAULT 2.0,
-        max_hum REAL DEFAULT 60.0,
-        min_hum REAL DEFAULT 20.0,
-        reading_count INTEGER DEFAULT 0
-    )`);
-
-    // 3. User-Tabelle & Default-Admin
-    db.run(`CREATE TABLE IF NOT EXISTS api_users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        api_key TEXT UNIQUE,
-        role TEXT,  -- 'ADMIN' oder 'SUPPLIER'
-        owner TEXT  -- Name des Großunternehmens oder des Lieferanten
-    )`, (err) => {
-        if (!err) {
-            // Legt den Master-Admin automatisch an, falls er noch nicht existiert
-            const insertAdmin = `INSERT OR IGNORE INTO api_users (api_key, role, owner) 
-                                VALUES (?, ?, ?)`;
-            db.run(insertAdmin, ['MASTER_ADMIN_2026', 'ADMIN', 'Großunternehmen AG'], (err) => {
-                if (err) console.error("❌ Fehler beim Anlegen des Default-Admins:", err.message);
-                else console.log("✅ Default-Admin 'MASTER_ADMIN_2026' ist einsatzbereit.");
-            });
-
-            // Optional: Einen Test-Supplier anlegen für das Supplier-Dashboard
-            db.run(insertAdmin, ['SUPPLIER_A_KEY', 'SUPPLIER', 'Supplier_A']);
-        }
-    });
-
-    // 4. Delivery Reports Tabelle
-    db.run(`CREATE TABLE IF NOT EXISTS delivery_reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    delivery_id TEXT UNIQUE,
-    pdf_path TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    integrity_status TEXT
-    )`);
-    console.log("DB-Schema initialisiert")
-});
-
-
-
 //API-ROUTES
 
 /// ==========================================
@@ -315,9 +112,18 @@ app.get('/api/dev/debug-mappings', (req, res) => {
 }); 
 
 app.get('/api/dev/health', async (req, res) => {
+    // 1. Hol dir den aktuellen Contract-Status direkt vom Service
+    let contract = FabricService.getContract();
+
+    // 2. Wenn noch kein Contract da ist, versuche ihn zu initialisieren
     if (!contract) {
-        await initBlockchain();
+        console.log("🔄 Health-Check: Initialisiere Blockchain-Verbindung...");
+        await FabricService.initBlockchain();
+        // Nach dem Init-Versuch erneut den Status prüfen
+        contract = FabricService.getContract();
     }
+
+    // 3. Jetzt den korrekten Status zurückgeben
     if (contract) {
         res.status(200).json({ status: "ready", blockchain: "connected" });
     } else {
@@ -375,7 +181,7 @@ app.post('/api/buffer', supplierAuth, (req, res) => {
             // 5. Übergabe an den Blockchain-Service
             if (shouldSync) {
                 // Hier sicherstellen, dass syncToBlockchain die richtigen Keys nutzt
-                const syncResult = await syncToBlockchain(logId, { 
+                const syncResult = await FabricService.syncToBlockchain(logId, { 
                     uniqueId, temp, humidity, lat, lon, measurementTime 
                 }, mapping);
 
@@ -421,10 +227,10 @@ app.post('/api/admin/set-limit/:supplier/:deliveryId', supplierAuth, async (req,
     const { maxTemp, minTemp, maxHum, minHum } = req.body;
     
     try {
-        if (!contract) await initBlockchain();
+        if (!activeContract) await FabricService.initBlockchain();
         
         // 1. Unveränderlich im Smart Contract speichern
-        await contract.submitTransaction('SetLimit', supplier, deliveryId, 
+        await activeContract.submitTransaction('SetLimit', supplier, deliveryId, 
             maxTemp.toString(), minTemp.toString(), maxHum.toString(), minHum.toString());
         
         // 2. Im lokalen SQLite-Cache spiegeln
@@ -463,8 +269,8 @@ app.get('/api/admin/audit/:supplier/:deliveryId', supplierAuth, async (req, res)
         sqlLogs.forEach(log => localDataMap[log.id] = log);
 
         // 3. Unveränderliche Daten aus der Blockchain laden
-        if (!contract) await initBlockchain();
-        const bcResult = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
+        if (!activeContract) await FabricService.initBlockchain();
+        const bcResult = await activeContract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
         const bcData = JSON.parse(Buffer.from(bcResult).toString('utf8'));
 
         // 4. DER DEEP-CHECK LOGIK-KERN
@@ -531,10 +337,10 @@ app.post('/api/admin/confirm-receipt/:supplier/:deliveryId', supplierAuth, async
     const recipientName = req.body.recipientName || "Zentrallager BASF Ludwigshafen"; 
 
     try {
-        if (!contract) await initBlockchain();
+        if (!activeContract) await FabricService.initBlockchain();
         
         // Blockchain-Eintrag: Dokumentiert den Zeitpunkt der physischen Übergabe
-        await contract.submitTransaction('ConfirmDelivery', supplier, deliveryId, recipientName);
+        await activeContract.submitTransaction('ConfirmDelivery', supplier, deliveryId, recipientName);
         
         // Status in DB ändern: Sensor bleibt aktiv (is_active = 1)
         db.run(`UPDATE hardware_mappings SET status = 'DELIVERED' WHERE delivery_id = ?`, [deliveryId], (err) => {
@@ -554,99 +360,42 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
     const { supplier, deliveryId } = req.params;
 
     try {
-        // 1. BLOCKCHAIN-VERBINDUNG & TRANSAKTION
-        if (!contract) await initBlockchain();
-        await contract.submitTransaction('FinalizeDelivery', supplier, deliveryId);
+        if (!activeContract) await FabricService.initBlockchain();
+        await activeContract.submitTransaction('FinalizeDelivery', supplier, deliveryId);
 
-        // 2. DATEN AUS SQL HOLEN (Wir wandeln db.get in ein Promise um, für sauberes async/await)
-        const statsQuery = `
-            SELECT 
-                MIN(l.timestamp) as start_time, 
-                MAX(l.timestamp) as end_time,
-                SUM(CASE WHEN l.is_alarm = 1 THEN 1 ELSE 0 END) as alarm_count
-            FROM sensor_logs l
-            JOIN hardware_mappings m ON l.sensor_id = m.sensor_id
-            WHERE m.delivery_id = ? AND m.is_active = 1`;
+        const statsQuery = `SELECT MIN(timestamp) as start_time, SUM(is_alarm) as alarm_count 
+                            FROM sensor_logs l JOIN hardware_mappings m ON l.sensor_id = m.sensor_id 
+                            WHERE m.delivery_id = ? AND m.is_active = 1`;
 
-        const stats = await new Promise((resolve, reject) => {
-            db.get(statsQuery, [deliveryId], (err, row) => {
-                if (err) reject(err);
-                else resolve(row || { start_time: null, end_time: null, alarm_count: 0 });
-            });
-        });
+        db.get(statsQuery, [deliveryId], async (err, stats) => {
+            if (err) return res.status(500).json({ error: err.message });
 
-        // 3. QR-CODE GENERIEREN
-        const auditUrl = `http://${req.get('host')}/api/supplier/${supplier}/audit/${deliveryId}?apiKey=${req.user.api_key}`;
-        const qrCodeDataUrl = await QRCode.toDataURL(auditUrl);
+            try {
+                // HIER DER NEUE SAUBERE AUFRUF:
+                const { filePath } = await AuditService.generateDeliveryReport(
+                    deliveryId, 
+                    supplier, 
+                    stats, 
+                    req.user.api_key, 
+                    req.get('host')
+                );
 
-        // 4. PDF-ERZEUGUNG VORBEREITEN
-        const fileName = `Report_${deliveryId}.pdf`;
-        const reportsDir = path.join(__dirname, 'reports');
-        const filePath = path.join(reportsDir, fileName);
-        
-        if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir);
-
-        const doc = new PDFDocument({ margin: 50 });
-        const writeStream = fs.createWriteStream(filePath);
-        doc.pipe(writeStream);
-
-        // --- PDF CONTENT ---
-        const logoPath = path.join(__dirname, '..', 'basf_logo.png');
-        if (fs.existsSync(logoPath)) doc.image(logoPath, 50, 45, { width: 60 });
-        
-        doc.fillColor('#00417F').fontSize(20).text('Lieferungsnachweiszertifikat', 120, 50, { align: 'right' });
-        doc.fontSize(10).fillColor('#000').text(`Zertifikats-ID: ${deliveryId}`, { align: 'right' });
-        doc.moveDown(1.5);
-        doc.path('M 50 100 L 550 100').stroke('#00417F'); 
-
-        doc.moveDown(2);
-        doc.fontSize(12).fillColor('#444').text('Transport-Zusammenfassung', { underline: true });
-        doc.fontSize(10).fillColor('#000');
-        doc.text(`Logistik-Partner:    ${supplier}`);
-        doc.text(`Zustellung an:       BASF Zentrallager Ludwigshafen`);
-        doc.text(`Start-Zeitpunkt:     ${stats.start_time || 'N/A'}`);
-        doc.text(`Abschluss-Zeit:      ${new Date().toLocaleString('de-DE')}`);
-        doc.text(`Status:              SICHER VERSIEGELT`);
-
-        doc.moveDown(4);
-        doc.rect(50, doc.y, 500, 25).fill('#f2f2f2');
-        doc.fillColor('#00417F').text('Compliance Audit', 55, doc.y - 18);
-        doc.moveDown(1.5);
-
-        if (stats.alarm_count === 0) {
-            doc.fillColor('green').fontSize(12).text('KONFORM: Alle Grenzwerte wurden lückenlos eingehalten.', { align: 'center' });
-        } else {
-            doc.fillColor('red').fontSize(12).text(`DISKREPANZ: ${stats.alarm_count} Grenzwert-Überschreitungen registriert.`, { align: 'center' });
-        }
-
-        doc.moveDown(3);
-        const qrY = doc.y;
-        doc.fillColor('#000').fontSize(12).text('Digitales Audit-Verfahren', 50, qrY, { underline: true });
-        doc.fontSize(9).text('Dieser Bericht ist durch einen kryptografischen Hash geschützt.', 50, qrY + 20, { width: 320 });
-        doc.image(qrCodeDataUrl, 400, qrY, { width: 100 });
-        doc.fontSize(8).fillColor('#999').text('Automatisierte Blockchain-Verifizierung', 50, 700, { align: 'center' });
-        doc.end();
-
-        // 5. ABSCHLUSS NACH DEM SCHREIBEN
-        writeStream.on('finish', () => {
-            db.serialize(() => {
-                db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId]);
-                db.run(`INSERT OR REPLACE INTO delivery_reports (delivery_id, pdf_path, integrity_status) 
-                        VALUES (?, ?, ?)`, [deliveryId, filePath, stats.alarm_count > 0 ? 'ALARM_LOGGED' : 'VERIFIED'], (err) => {
-                    if (err) return res.status(500).json({ error: "DB-Fehler bei Report-Eintrag" });
+                // Abschluss-Logik (DB Update & Response)
+                db.serialize(() => {
+                    db.run(`UPDATE hardware_mappings SET is_active = 0, status = 'CLOSED' WHERE delivery_id = ?`, [deliveryId]);
+                    db.run(`INSERT OR REPLACE INTO delivery_reports (delivery_id, pdf_path, integrity_status) 
+                            VALUES (?, ?, ?)`, [deliveryId, filePath, stats.alarm_count > 0 ? 'ALARM_LOGGED' : 'VERIFIED']);
                     
-                    res.json({ 
-                        status: "Success", 
-                        message: `Report für ${deliveryId} generiert.`,
-                        downloadUrl: `/api/admin/download-report/${deliveryId}` 
-                    });
+                    res.json({ status: "Success", message: `Report für ${deliveryId} generiert.` });
                 });
-            });
-        });
 
+            } catch (pdfErr) {
+                console.error("PDF Fehler:", pdfErr);
+                res.status(500).json({ error: "Zertifikatserstellung fehlgeschlagen" });
+            }
+        });
     } catch (err) {
-        console.error("❌ Fehler im Final Checkout:", err);
-        if (!res.headersSent) res.status(500).json({ error: err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -654,9 +403,9 @@ app.post('/api/admin/final-checkout/:supplier/:deliveryId', supplierAuth, async 
 app.get('/api/admin/alerts', supplierAuth, async (req, res) => {
     if (req.user.role !== 'ADMIN') return res.status(403).json({ error: "Nur für Admins" });
     try {
-        if (!contract) await initBlockchain();
+        if (!activeContract) await FabricService.initBlockchain();
         // Nutzt die Chaincode-Funktion für den Gesamtüberblick
-        const result = await contract.evaluateTransaction('GetAllAssets');
+        const result = await activeContract.evaluateTransaction('GetAllAssets');
         const allData = JSON.parse(Buffer.from(result).toString('utf8'));
         
         const alerts = allData.filter(asset => asset.IsWarning === true);
@@ -740,15 +489,15 @@ app.post('/api/admin/onboard-supplier', supplierAuth, async (req, res) => {
         // 4. Blockchain-Registrierung (Die "digitale Urkunde")
         try {
             // Blockchain-Verbindung sicherstellen
-            if (!contract) {
+            if (!activeContract) {
                 console.log("🔗 Initialisiere Blockchain-Verbindung...");
-                await initBlockchain();
+                await FabricService.initBlockchain();
             }
 
             console.log(`🔗 BLOCKCHAIN: Registriere Lieferant '${supplierName}' im Ledger...`);
             
             // Aufruf der Chaincode-Funktion
-            await contract.submitTransaction(
+            await activeContract.submitTransaction(
                 'RegisterSupplier', 
                 supplierName, 
                 "Zertifizierter Logistikpartner (Neuaufnahme 2026)"
@@ -840,10 +589,10 @@ app.get('/api/supplier/:supplier/audit/:deliveryId', supplierAuth, async (req, r
     const { supplier, deliveryId } = req.params;
 
     try {
-        if (!contract) await initBlockchain();
+        if (!activeContract) await FabricService.initBlockchain();
 
         // 1. Blockchain-Daten abrufen (Der "Gold-Standard")
-        const bcResult = await contract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
+        const bcResult = await activeContract.evaluateTransaction('GetAssetsByDelivery', supplier, deliveryId);
         const bcRecords = JSON.parse(Buffer.from(bcResult).toString('utf8'));
 
         // 2. Integritäts-Check vorbereiten
@@ -896,11 +645,11 @@ app.get('/api/supplier/alerts', supplierAuth, async (req, res) => {
     const supplierName = req.user.owner; 
 
     try {
-        if (!contract) await initBlockchain();
+        if (!activeContract) await FabricService.initBlockchain();
 
         // NUTZT DIE SPEZIFISCHE CHAINCODE-LOGIK:
         // GetAssetsBySupplier(ctx, supplierName)
-        const result = await contract.evaluateTransaction('GetAssetsBySupplier', supplierName);
+        const result = await activeContract.evaluateTransaction('GetAssetsBySupplier', supplierName);
         const myAssets = JSON.parse(Buffer.from(result).toString('utf8'));
         
         // Filtert nur die Warnungen aus SEINEN Assets
@@ -991,7 +740,7 @@ app.post('/api/supplier/onboard', supplierAuth, async (req, res) => {
         
         try {
             // Blockchain: Registrierung des logistischen Vorgangs
-            await contract.submitTransaction('InitializeDelivery', supplierName, deliveryId, uniqueSensorId);
+            await activeContract.submitTransaction('InitializeDelivery', supplierName, deliveryId, uniqueSensorId);
             
             res.json({ 
                 status: "Success", 
@@ -1017,15 +766,15 @@ app.post('/api/supplier/set-limit/:deliveryId', supplierAuth, async (req, res) =
 
     try {
         // 1. Blockchain-Verbindung sicherstellen
-        if (!contract) {
+        if (!activeContract) {
             console.log("🔗 Initialisiere Blockchain-Verbindung...");
-            await initBlockchain();
+            await FabricService.initBlockchain();
         }
 
         // 2. Unveränderlich im Smart Contract speichern
         // Wir nutzen 'SetLimit' - achte darauf, dass dieser Name im Chaincode existiert
         console.log("📡 Sende Transaktion 'SetLimit' an Hyperledger Fabric...");
-        await contract.submitTransaction(
+        await activeContract.submitTransaction(
             'SetLimit', 
             supplier, 
             deliveryId, 
@@ -1114,11 +863,11 @@ setInterval(() => {
 
         for (const row of rows) {
             try {
-                if (!contract) await initBlockchain();
+                if (!activeContract) await FabricService.initBlockchain();
                 
                 const bcAssetId = `LOG-${Math.floor(Date.now() / 1000)}-${row.id}`;
                 
-                await contract.submitTransaction(
+                await activeContract.submitTransaction(
                     'CreateAsset', 
                     bcAssetId, 
                     row.sensor_id, 
@@ -1134,7 +883,7 @@ setInterval(() => {
                 
             } catch (bcErr) {
                 console.error(`❌ Sync weiterhin fehlgeschlagen für SQL-ID ${row.id}.`);
-                contract = null; 
+                activeContract = null; 
                 break; 
             }
         }

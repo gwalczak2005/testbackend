@@ -3,6 +3,32 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 
+/**async function generateQualityReport(deliveryId, auditSummary) {
+    const doc = new PDFDocument();
+    const fileName = `Report_${deliveryId}.pdf`;
+    const filePath = path.join(__dirname, 'reports', fileName);
+
+    // Sicherstellen, dass der Ordner existiert
+    if (!fs.existsSync('./reports')) fs.mkdirSync('./reports');
+
+    doc.pipe(fs.createWriteStream(filePath));
+
+    // PDF Inhalt
+    doc.fontSize(20).text('QUALITÄTS-ZERTIFIKAT: KÜHLKETTE', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12).text(`Lieferungs-ID: ${deliveryId}`);
+    doc.text(`Datum: ${new Date().toLocaleString()}`);
+    doc.moveDown();
+    doc.text(`Blockchain-Status: VERSIEGELT (Hyperledger Fabric)`);
+    doc.text(`Integritäts-Prüfung: ${auditSummary.status}`);
+    doc.moveDown();
+    doc.text(`Anzahl Messpunkte (Blockchain): ${auditSummary.blockchainTotal}`);
+    doc.text(`Warnungen/Alarme: ${auditSummary.anomaliesDetected}`);
+    
+    doc.end();
+    return filePath;
+}
+
 /**
  * Generiert ein Revisionssicheres PDF-Zertifikat inkl. QR-Code
  */
