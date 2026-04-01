@@ -1,24 +1,21 @@
 // VARIABLEN, PFADE, KONSTANTEN
 const express = require('express');
-const grpc = require('@grpc/grpc-js');
-const { connect, signers } = require('@hyperledger/fabric-gateway');
-const fs = require('fs');
+//const grpc = require('@grpc/grpc-js');
+//const { connect, signers } = require('@hyperledger/fabric-gateway');
+//const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const walletPath = path.resolve(__dirname, 'wallet', 'org1-admin');
-const certPath = path.join(walletPath, 'msp', 'signcerts', 'cert.pem');
-const keyDirectoryPath = path.join(walletPath, 'msp', 'keystore');
-const tlsCertPath = path.join(walletPath, 'tls', 'ca.crt');
+//const crypto = require('crypto');
+//const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+//const walletPath = path.resolve(__dirname, 'wallet', 'org1-admin');
+//const certPath = path.join(walletPath, 'msp', 'signcerts', 'cert.pem');
+//const keyDirectoryPath = path.join(walletPath, 'msp', 'keystore');
+//const tlsCertPath = path.join(walletPath, 'tls', 'ca.crt');
 const port = 3000;
-const API_KEYS = {                                                          //Schlüssel-Datenbank
-    "DEIN_ADMIN_MASTER_KEY": { role: "ADMIN", owner: "Großunternehmen" },
-    "KEY_SUPPLIER_A": { role: "SUPPLIER", owner: "Supplier_A" }
-};
+
 
 const FabricService = require('./services/FabricService');
 const { db } = require('./services/DatabaseService');
-const activeContract = FabricService.getContract();
+//const activeContract = FabricService.getContract();
 
 const AuditService = require('./services/AuditService'); //für API Final-Checkout !!
 
@@ -28,11 +25,16 @@ app.use(express.json());
 const AdminRoutes = require('./routes/AdminRoutes');
 const DeveloperRoutes = require('./routes/DeveloperRoutes');
 const SupplierRoutes = require('./routes/SupplierRoutes');
+const SensorRoutes = require('./routes/SensorRoutes');
+
 
 // Bindet alle Routen aus den Dateien direkt an die Root-Ebene
-app.use('/', AdminRoutes);
-app.use('/', DeveloperRoutes);
-app.use('/', SupplierRoutes);
+// app.js - ÄNDERE DIESE ZEILEN:
+app.use('/api/admin', AdminRoutes);      // ← Prefix hinzugefügt
+app.use('/api/dev', DeveloperRoutes);    // ← Prefix hinzugefügt  
+app.use('/api/supplier', SupplierRoutes); // ← Prefix hinzugefügt
+app.use('/api/', SensorRoutes); // ← Prefix hinzugefügt
+
 
 // Hilfsfunktion zum Senden an die Blockchain
 async function sendToHyperledger(id, temp, humidity) {
@@ -47,49 +49,6 @@ async function sendToHyperledger(id, temp, humidity) {
     };
 }
 
-// Authentifikation-Middleware
-const supplierAuth = (req, res, next) => {
-    const apiKey = req.headers['x-api-key'] || req.query.apiKey;
-    const requestedSupplier = req.params.supplier;
-
-    if (!apiKey) {
-        return res.status(401).json({ error: "Kein API-Key bereitgestellt." });
-    }
-
-    db.get(`SELECT * FROM api_users WHERE api_key = ?`, [apiKey], (err, user) => {
-        if (err || !user) {
-            return res.status(401).json({ error: "Ungültiger Key." });
-        }
-
-        // --- VERBESSERTER CHECK ---
-        const isAdmin = user.role === "ADMIN";
-
-        // 1. Wenn ein Admin anklopft: Sofort durchlassen
-        if (isAdmin) {
-            req.user = user;
-            return next();
-        }
-
-        // 2. Wenn ein Supplier anklopft:
-        if (user.role === "SUPPLIER") {
-            // A) Fall: In der URL steht ein Name (z.B. /api/history/Lieferant1)
-            //    Dann MUSS dieser Name exakt dem Owner des Keys entsprechen.
-            if (requestedSupplier && requestedSupplier !== user.owner) {
-                console.warn(`🔒 ALARM: ${user.owner} wollte auf fremde Daten von [${requestedSupplier}] zugreifen!`);
-                return res.status(403).json({ error: "Zugriff verweigert", message: "Du darfst nur deine eigenen Daten sehen." });
-            }
-
-            // B) Fall: Keine URL-Parameter (z.B. /api/supplier/onboard)
-            //    Hier lassen wir ihn durch, da die Route selbst (z.B. Onboarding) 
-            //    im nächsten Schritt sowieso user.owner zur Erstellung nutzt.
-            req.user = user;
-            return next();
-        }
-
-        // 3. Fallback: Unbekannte Rolle
-        return res.status(403).json({ error: "Zugriff verweigert", message: "Rolle nicht autorisiert." });
-    });
-};
 
 //API-ROUTES
 
@@ -143,9 +102,18 @@ setInterval(() => {
     });
 }, 30000);
 
+(async () => {
+    try {
+        console.log("🔄 Systemstart: Initialisiere Blockchain-Verbindung...");
+        await FabricService.initBlockchain();
+        console.log("✅ Systemstart: Blockchain erfolgreich verbunden.");
+    } catch (err) {
+        console.error("❌ Systemstart: Blockchain-Verbindung fehlgeschlagen:", err.message);
+    }
+})();
+
+
 // --- SERVER START ---
 app.listen(port, '0.0.0.0', () => {
     console.log(`--- BACKEND LIVE auf Port ${port} ---`);
 });
-
-module.exports = { supplierAuth };

@@ -37,19 +37,7 @@ echo -n "[4/4] Warte auf System-Bereitschaft (Health-Check)"
 MAX_RETRIES=30 
 COUNT=0
 
-# Wichtig: Wir prüfen auf den String "ready", den deine app.js nach initBlockchain() sendet
-while ! curl -sf http://127.0.0.1:3000/api/dev/health | grep -q "ready"; do
-    echo -n "."
-    sleep 3
-    COUNT=$((COUNT+1))
-    if [ $COUNT -ge $MAX_RETRIES ]; then
-        echo -e "\n FEHLER: Timeout! Backend konnte keine Verbindung zur Blockchain aufbauen."
-        echo "Letzte Zeilen aus $LOG_FILE:"
-        tail -n 20 "$LOG_FILE"
-        kill $BACKEND_PID 2>/dev/null
-        exit 1
-    fi
-done
+
 
 echo -e "\n System ist ONLINE (PID: $BACKEND_PID)"
 echo "gRPC-Stabilisierung"

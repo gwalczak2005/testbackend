@@ -103,5 +103,5 @@ async function syncToBlockchain(logId, sensorData, mapping) {
 module.exports = {
     initBlockchain,
     syncToBlockchain,
-    getContract: () => contract // Diese Zeile ist der Schlüssel!};
-}
+    getContract: () => contract
+};

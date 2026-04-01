@@ -3,7 +3,7 @@ const router = express.Router();
 const FabricService = require('../services/FabricService');
 const AuditService = require('../services/AuditService');
 const { db } = require('../services/DatabaseService');
-const { supplierAuth } = require('../app');
+const supplierAuth = require('../services/SupplierAuth');
 
 // ==========================================
 // 3. Supplier Area (/api/supplier)

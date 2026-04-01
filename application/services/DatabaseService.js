@@ -1,7 +1,10 @@
 const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-
+const API_KEYS = {                                                          //Schlüssel-Datenbank
+    "DEIN_ADMIN_MASTER_KEY": { role: "ADMIN", owner: "Großunternehmen" },
+    "KEY_SUPPLIER_A": { role: "SUPPLIER", owner: "Supplier_A" }
+};
 
 
 // --- DATENBANK INITIALISIERUNG & SCHEMA ---
