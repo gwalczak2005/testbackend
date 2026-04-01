@@ -36,11 +36,32 @@ BACKEND_PID=$!
 echo -n "[4/4] Warte auf System-Bereitschaft (Health-Check)"
 MAX_RETRIES=30 
 COUNT=0
+HEALTH_URL="http://localhost:3000/api/dev/health"
 
+while [ $COUNT -lt $MAX_RETRIES ]; do
+    # -s (silent), -o /dev/null (Output verwerfen), -w (nur HTTP Statuscode ausgeben)
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
 
+    if [ "$HTTP_STATUS" -eq 200 ]; then
+        echo -e "\n✅ System ist ONLINE (PID: $BACKEND_PID)"
+        break
+    elif [ "$HTTP_STATUS" -eq 503 ]; then
+        echo -n "." # Server da, aber Blockchain-Init läuft noch
+    else
+        echo -n "?" # Server reagiert noch gar nicht (z.B. während Port-Bindung)
+    fi
 
-echo -e "\n System ist ONLINE (PID: $BACKEND_PID)"
-echo "gRPC-Stabilisierung"
+    COUNT=$((COUNT + 1))
+    sleep 2
+done
+
+if [ $COUNT -eq $MAX_RETRIES ]; then
+    echo -e "\n❌ FEHLER: Timeout beim Health-Check erreicht!"
+    echo "Prüfe die Logs mit: tail -n 20 $LOG_FILE"
+    exit 1
+fi
+
+echo "gRPC-Stabilisierung abgeschlossen."
 sleep 10
 
 # 5. Seeding ausführen

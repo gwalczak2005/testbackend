@@ -30,27 +30,28 @@ router.get('/debug-mappings', (req, res) => {
     });
 }); 
 
-router.get('/health', async (req, res) => {
-    console.log("🔍 Health-Check: Anfrage empfangen...");
-    console.log("🔍 Debug: FabricService Objekt geladen?", !!FabricService);
-    console.log("🔍 Debug: getContract Funktion vorhanden?", typeof FabricService.getContract);    // 1. Hol dir den aktuellen Contract-Status direkt vom Service
+router.get('/health', (req, res) => {
+    console.log("🔍 Health-Check: Passiv-Modus...");
     
-    let contract = FabricService.getContract();
-    console.log("🔍 Health-Check: Aktueller Contract-Status:", contract ? "Verbunden" : "Nicht verbunden");
+    // Nur den Status abfragen, nicht aktiv .initBlockchain() rufen!
+    const contract = FabricService.getContract();
+    const isReady = !!contract;
 
-    // 2. Wenn noch kein Contract da ist, versuche ihn zu initialisieren
-    if (!contract) {
-        console.log("🔄 Health-Check: Initialisiere Blockchain-Verbindung...");
-        await FabricService.initBlockchain();
-        // Nach dem Init-Versuch erneut den Status prüfen
-        contract = FabricService.getContract();
-    }
+    console.log("🔍 Status:", isReady ? "Verbunden" : "Initialisierung läuft...");
 
-    // 3. Jetzt den korrekten Status zurückgeben
-    if (contract) {
-        res.status(200).json({ status: "ready", blockchain: "connected" });
+    if (isReady) {
+        return res.status(200).json({ 
+            status: "ready", 
+            blockchain: "connected",
+            timestamp: new Date().toISOString()
+        });
     } else {
-        res.status(503).json({ status: "not ready", blockchain: "disconnected" });
+        // 503 signalisiert: Dienst ist da, aber noch nicht bereit (Ready-Probe)
+        return res.status(503).json({ 
+            status: "not ready", 
+            blockchain: "disconnected",
+            message: "System is still initializing or blockchain is unreachable."
+        });
     }
 });
 
