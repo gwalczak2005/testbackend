@@ -54,7 +54,4 @@ echo "Datenbank-Reset durchgeführt, Standard-API-Keys hinterlegt."
 echo "Chaincode-Container-Pause"
 sleep 15
 
-echo "--------------------------------------------------"
-echo "✅ SYSTEM BEREIT"
-echo "👉 Starte Backend mit: node $PROJECT_ROOT/application/app.js"
-echo "--------------------------------------------------"
+echo "SYSTEM BEREIT"

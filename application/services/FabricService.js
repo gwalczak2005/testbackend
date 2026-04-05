@@ -16,7 +16,6 @@ let messageCounter = 0;
 
 async function initBlockchain() {
     try {
-        // Falls bereits eine alte Verbindung besteht, sauber schließen
         if (gateway) gateway.close();
         if (client) client.close();
 
@@ -95,7 +94,7 @@ async function syncToBlockchain(logId, sensorData, mapping) {
         }
         
         return { success: false, assetId: bcAssetId };
-    } // <-- Schließt den catch-Block
+    } 
 }
 
 

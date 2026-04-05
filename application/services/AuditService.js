@@ -28,10 +28,9 @@ const path = require('path');
     doc.end();
     return filePath;
 }
+**/
 
-/**
- * Generiert ein Revisionssicheres PDF-Zertifikat inkl. QR-Code
- */
+//  Generiert ein Revisionssicheres PDF-Zertifikat inkl. QR-Code
 async function generateDeliveryReport(deliveryId, supplier, stats, apiKey, host) {
     return new Promise(async (resolve, reject) => {
         try {
