@@ -12,32 +12,29 @@ const path = require('path');
 //const tlsCertPath = path.join(walletPath, 'tls', 'ca.crt');
 const port = 3000;
 
-
+//Service-Verknüpfungen
 const FabricService = require('./services/FabricService');
 const { db } = require('./services/DatabaseService');
-//const activeContract = FabricService.getContract();
-
-const AuditService = require('./services/AuditService'); //für API Final-Checkout !!
+const AuditService = require('./services/AuditService'); 
 
 const app = express();
 app.use(express.json());
 
+
+// API-Routen
 const AdminRoutes = require('./routes/AdminRoutes');
 const DeveloperRoutes = require('./routes/DeveloperRoutes');
 const SupplierRoutes = require('./routes/SupplierRoutes');
 const SensorRoutes = require('./routes/SensorRoutes');
 
-
-// Bindet alle Routen aus den Dateien direkt an die Root-Ebene
-// app.js - ÄNDERE DIESE ZEILEN:
-app.use('/api/admin', AdminRoutes);      // ← Prefix hinzugefügt
-app.use('/api/dev', DeveloperRoutes);    // ← Prefix hinzugefügt  
-app.use('/api/supplier', SupplierRoutes); // ← Prefix hinzugefügt
-app.use('/api/', SensorRoutes); // ← Prefix hinzugefügt
+app.use('/api/admin', AdminRoutes);      
+app.use('/api/dev', DeveloperRoutes);      
+app.use('/api/supplier', SupplierRoutes); 
+app.use('/api/', SensorRoutes); // Sonderroute für api/buffer
 
 
-// Hilfsfunktion zum Senden an die Blockchain
-async function sendToHyperledger(id, temp, humidity) {
+//Funktion noch auslagern
+async function sendToHyperledger(id, temp, humidity) { // Hilfsfunktion zum Senden an die Blockchain
     // 1. DYNAMISCHES MAPPING AUS DER DB HOLEN (Dein Promise-Block)
     const getMapping = () => {
         return new Promise((resolve, reject) => {
@@ -50,13 +47,8 @@ async function sendToHyperledger(id, temp, humidity) {
 }
 
 
-//API-ROUTES
 
-
-
-// ==========================================
-// 4. BACKGROUND WORKER (Offline-Resilienz)
-// ==========================================
+// BACKGROUND WORKER (Offline-Resilienz)
 
 setInterval(() => {
     const sql = `
@@ -102,7 +94,7 @@ setInterval(() => {
     });
 }, 30000);
 
-(async () => {
+(async () => { //1.4.26: Prüfen ob die Funktion entfernt werden kann
     try {
         console.log("🔄 Systemstart: Initialisiere Blockchain-Verbindung...");
         await FabricService.initBlockchain();
