@@ -24,7 +24,7 @@ const SEED_CONFIG = {
     ],
     target: { lat: 49.5209, lon: 8.4267 }, // Ziel: BASF Ludwigshafen
     readingsPerDelivery: 40,
-    deliveriesPerSupplier: 2 // Jede Firma macht 2-3 Lieferungen
+    deliveriesPerSupplier: 2 
 };
 
 function getScenarioData(scenario, step, totalSteps) {
