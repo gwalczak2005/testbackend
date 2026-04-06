@@ -21,7 +21,7 @@ const SEED_CONFIG = {
         { 
             name: 'Global_Transport_C', 
             key: 'KEY_TRANS_C', 
-            start: { lat: 52.5095, lon: 13.4288 }, // Berlin (Neu)
+            start: { lat: 52.5095, lon: 13.4288 }, // Berlin
             scenario: 'SLOW_WARMING',
             desc: "Kühlaggregat schwach: Steigt am Ende auf 10 Grad."
         },
@@ -40,7 +40,7 @@ const SEED_CONFIG = {
             desc: "Wasserschaden: Luftfeuchtigkeit springt auf 90%."
         }
     ],
-    target: { lat: 49.5209, lon: 8.4267 }, // Ziel: BASF Ludwigshafen (Neu)
+    target: { lat: 49.5209, lon: 8.4267 }, // Ziel: BASF Zentrallager Ludwigshafen 
     readingsPerDelivery: 50
 };
 
@@ -59,10 +59,10 @@ function getScenarioData(scenario, step, totalSteps) {
 
 async function runSeed() {
     try {
-        console.log("🚀 Starte Seeding Richtung Ludwigshafen...");
+        console.log("STARTE SEEDING");
 
         for (const s of SEED_CONFIG.suppliers) {
-            console.log(`\n📦 Profil: ${s.name} (${s.scenario})`);
+            console.log(`\n PROFIL: ${s.name} (${s.scenario})`);
 
             // 1. Onboard Supplier
             await axios.post(`${BASE_URL}/api/admin/onboard-supplier`, 
@@ -106,13 +106,13 @@ async function runSeed() {
             
             // 5. Finalize
             await axios.post(`${BASE_URL}/api/admin/confirm-receipt/${s.name}/${deliveryId}`, 
-                { recipientName: "BASF Ludwigshafen" }, { headers: { 'x-api-key': ADMIN_KEY } });
+                { recipientName: "BASF Zentrallager Ludwigshafen" }, { headers: { 'x-api-key': ADMIN_KEY } });
             await axios.post(`${BASE_URL}/api/admin/final-checkout/${s.name}/${deliveryId}`, 
                 {}, { headers: { 'x-api-key': ADMIN_KEY } });
             
-            console.log(`✅ ${s.name} erfolgreich abgeschlossen.`);
+            console.log(`${s.name} erfolgreich abgeschlossen.`);
         }
-        console.log("\n✨ Seeding beendet. Die Daten für das BASF-Zentrallager sind bereit.");
+        console.log("\n SEEDING BEENDET");
     } catch (e) { 
         console.error("❌ Fehler:", e.response ? JSON.stringify(e.response.data) : e.message);
     }
