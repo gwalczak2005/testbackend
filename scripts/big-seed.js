@@ -22,13 +22,12 @@ const SEED_CONFIG = {
         { name: 'Silk_Road_L', key: 'KEY_SILK_L', start: { lat: 31.2304, lon: 121.4737 }, scenario: 'SLOW_WARMING', region: 'AS' }, // Shanghai
         { name: 'Tokyo_Safe_M', key: 'KEY_SAFE_M', start: { lat: 35.6762, lon: 139.6503 }, scenario: 'PERFECT', region: 'AS' }  // Tokio
     ],
-    target: { lat: 49.5209, lon: 8.4267 }, // Ziel: BASF Ludwigshafen
+    target: { lat: 49.5209, lon: 8.4267 }, // Ziel: BASF Zentrallager Ludwigshafen
     readingsPerDelivery: 40,
     deliveriesPerSupplier: 2 
 };
 
 function getScenarioData(scenario, step, totalSteps) {
-    // Grundrauschen hinzufügen, um NaN in Korrelationen zu vermeiden
     let temp = 4.0 + (Math.random() * 1.5); 
     let hum = 45.0 + (Math.random() * 5.0); 
 
@@ -57,10 +56,10 @@ function getScenarioData(scenario, step, totalSteps) {
 
 async function runSeed() {
     try {
-        console.log("🚀 Starte globales Seeding für 10 Lieferanten...");
+        console.log("STARTE SEEDING");
 
         for (const s of SEED_CONFIG.suppliers) {
-            console.log(`\n🌍 Region: ${s.region} | Lieferant: ${s.name}`);
+            console.log(`\n Region: ${s.region} | Lieferant: ${s.name}`);
 
             // 1. Onboard Supplier (Admin Route) [cite: 1, 4]
             await axios.post(`${BASE_URL}/api/admin/onboard-supplier`, 
@@ -105,10 +104,10 @@ async function runSeed() {
                 await axios.post(`${BASE_URL}/api/admin/final-checkout/${s.name}/${deliveryId}`, 
                     {}, { headers: { 'x-api-key': ADMIN_KEY } });
                 
-                console.log(`  ✅ Lieferung ${deliveryId} abgeschlossen.`);
+                console.log(` Lieferung ${deliveryId} abgeschlossen.`);
             }
         }
-        console.log("\n✨ Globales Seeding beendet.");
+        console.log("SEEDING BEENDET");
     } catch (e) { 
         console.error("❌ Fehler:", e.response ? JSON.stringify(e.response.data) : e.message);
     }
