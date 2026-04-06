@@ -18,7 +18,8 @@ class AssetTransfer extends Contract {
 
     // Setzt spezifische Grenzwerte für eine Lieferung (Soll-Werte)
     async SetLimit(ctx, supplierName, deliveryId, maxTemp, minTemp, maxHum, minHum) {
-    // 1. Validierung der Business-Logik
+    
+        // 1. Validierung der Business-Logik
     if (parseFloat(minTemp) >= parseFloat(maxTemp)) {
         throw new Error("MinTemp muss kleiner als MaxTemp sein.");
     }
@@ -53,7 +54,7 @@ class AssetTransfer extends Contract {
         // 1. Composite Key für das Asset bauen
         const compositeKey = ctx.stub.createCompositeKey('asset', [supplierName, deliveryId, id]);
         
-        // --- HARD-LOCK FÜR GESCHLOSSENE LIEFERUNGEN ---
+        // HARD-LOCK für geschlossene Lieferungen
         const statusKey = ctx.stub.createCompositeKey('status', [supplierName, deliveryId]);
         const statusBuffer = await ctx.stub.getState(statusKey);
         
@@ -64,7 +65,7 @@ class AssetTransfer extends Contract {
             }
         }
 
-        // 2. DATEN PARSEN & LIMITS PRÜFEN
+        // 2. Daten parsen, Limits prüfen
         const t = parseFloat(temperature);
         const h = parseFloat(humidity);
         const latitude = parseFloat(lat) || 0.0; // Fallback auf 0.0 falls leer
@@ -93,8 +94,8 @@ class AssetTransfer extends Contract {
             SensorID: sensorId,
             Temperature: t, 
             Humidity: h,
-            Latitude: latitude,  // <-- NEU
-            Longitude: longitude, // <-- NEU
+            Latitude: latitude, 
+            Longitude: longitude, 
             Supplier: supplierName,
             DeliveryID: deliveryId,
             IsWarning: isWarning,
@@ -117,12 +118,12 @@ class AssetTransfer extends Contract {
 
     // Sucht alle Messwerte für eine spezifische Lieferung eines Lieferanten
     async GetAssetsByDelivery(ctx, supplierName, deliveryId) {
-    // Wir nutzen den Teil-Key, um alle IDs unter dieser Lieferung zu finden
+    // Teil-Key, um alle IDs unter dieser Lieferung zu finden
     const iterator = await ctx.stub.getStateByPartialCompositeKey('asset', [supplierName, deliveryId]);
     return await this._getAllResults(iterator);
     }
     
-    // Gibt ALLE Messpunkte zurück (über alle Lieferanten hinweg)
+    // Gibt ALLE Messpunkte, aller Lieferanten zurück
     async GetAllAssets(ctx) {
         const iterator = await ctx.stub.getStateByPartialCompositeKey('asset', []);
         return await this._getAllResults(iterator);
