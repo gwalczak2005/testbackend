@@ -1,4 +1,9 @@
 #!/bin/bash
+#Hilfs-Skript um über die Konsole direkt Daten auf der Blockchain abzufragen"
+# Abfrage aller Assets mit: ./check-ledger.sh
+# Abfrage eines bestimmten Lieferanten mit: ./check-ledger.sh [Lieferantenname]
+# Lieferantenname siehe SQL in api_users, Spalte 'owner'
+#Bsp.: ./check-ledger.sh [Logistik_Pro_A] => Abfrage für Lieferanten Logistik_Pro_A
 
 # Pfade absolut definieren
 BASE_DIR="/home/wsl/testbackend"
@@ -13,13 +18,12 @@ export CORE_PEER_TLS_ROOTCERT_FILE=${INFRA_PATH}/organizations/peerOrganizations
 export CORE_PEER_MSPCONFIGPATH=${INFRA_PATH}/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp
 export CORE_PEER_ADDRESS=localhost:7051
 
-echo "--- ⛓️  BLOCKCHAIN LEDGER ABFRAGE ---"
+echo "BLOCKCHAIN LEDGER ABFRAGE"
 
 if [ -z "$1" ]; then
     echo "Nutze: ./check-ledger.sh [GetAllAssets | GetBySupplier]"
     echo "Standard: Zeige alle Assets..."
     peer chaincode query -C mychannel -n basic -c '{"Args":["GetAllAssets"]}' | jq .
 else
-    # Beispiel für gezielte Abfrage eines Suppliers: ./check-ledger.sh Logistik_Pro_A
     peer chaincode query -C mychannel -n basic -c '{"Args":["GetAssetsBySupplier", "'$1'"]}' | jq .
 fi

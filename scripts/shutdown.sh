@@ -5,7 +5,7 @@ PROJECT_ROOT=$HOME/testbackend
 INFRA_PATH=$PROJECT_ROOT/infrastructure
 APP_WALLET=$PROJECT_ROOT/application/wallet/org1-admin
 
-echo "SHUTDOWN & CLEANUP STARTEN..."
+echo "SHUTDOWN STARTET"
 
 #Zusatz: sensor_data.db entfernen
 echo "Lösche SQL sensor_data.db"
@@ -13,7 +13,7 @@ rm -f ./application/sensor_data.db
 
 # 1. Hyperledger Fabric Netzwerk stoppen
 if [ -d "$INFRA_PATH" ]; then
-    echo "Fahre Fabric-Netzwerk herunter..."
+    echo "Hyperledger wird gestoppt"
     cd $INFRA_PATH
     ./network.sh down
 else
@@ -21,7 +21,7 @@ else
 fi
 
 # 2. Radikale Docker-Reinigung (löscht alle Rückstände)
-echo "Entferne alle Docker-Container, Volumes und Netzwerke..."
+echo "Entferne Docker-Container, Volumes, Netzwerke"
 docker rm -f $(docker ps -aq) 2>/dev/null
 docker volume prune -f
 docker network prune -f
@@ -37,4 +37,4 @@ fi
 #echo "Beende eventuell laufende Node.js Prozesse..."
 #pkill -9 node 2>/dev/null
 
-echo "Netzwerk heruntergefahren"
+echo "NETZWERK HERUNTERGEFAHREN"
