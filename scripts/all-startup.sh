@@ -7,9 +7,7 @@ APP_PATH="$BASE_DIR/application/app.js"
 SEED_PATH="$BASE_DIR/scripts/seed.js"
 LOG_FILE="$BASE_DIR/backend.log"
 
-echo "--------------------------------------------------"
 echo "Start all-startup Skript; 1: startup.sh 2. app.js 3. seed.js"
-echo "--------------------------------------------------"
 
 # 1. Infrastruktur über dein bestehendes Skript starten
 echo "[1/4] Starte Blockchain-Infrastruktur (startup.sh)..."
@@ -20,19 +18,19 @@ else
     exit 1
 fi
 
-# 2. Port 3000 bereinigen (Sicherheitshalber)
+# 2. Port 3000 bereinigen
 echo "[2/4] Bereinige Port 3000..."
 fuser -k 3000/tcp > /dev/null 2>&1
 sleep 10
 
 # 3. Backend im Hintergrund starten
 echo "[3/4] Starte Backend: $APP_PATH"
-# Wir wechseln ins Verzeichnis, damit Node relative Pfade (Wallet/DB) korrekt findet
+#Verzeichniswechsel, damit Node die relativen 'Wallet/DB'-Pfade findet
 cd "$BASE_DIR/application" || exit
 nohup node "app.js" > "$LOG_FILE" 2>&1 &
 BACKEND_PID=$!
 
-# 4. Warten bis der Server & die Blockchain-Verbindung stehen
+# 4. Warten bis Server und Blockchain-Verbindung stehen
 echo -n "[4/4] Warte auf System-Bereitschaft (Health-Check)"
 MAX_RETRIES=30 
 COUNT=0
@@ -56,8 +54,8 @@ while [ $COUNT -lt $MAX_RETRIES ]; do
 done
 
 if [ $COUNT -eq $MAX_RETRIES ]; then
-    echo -e "\n❌ FEHLER: Timeout beim Health-Check erreicht!"
-    echo "Prüfe die Logs mit: tail -n 20 $LOG_FILE"
+    echo -e "\n❌ FEHLER: Timeout beim Health-Check!"
+    echo "Log-Prüfbefehl: tail -n 20 $LOG_FILE"
     exit 1
 fi
 
@@ -66,7 +64,7 @@ sleep 10
 
 # 5. Seeding ausführen
 echo "--------------------------------------------------"
-echo "Starte Daten-Seeding (Szenarien für BASF)..."
+echo "Starte Daten-Seeding"
 node "$SEED_PATH"
 echo "System bereit für die Demo."
 echo "Monitoring mit: tail -f $LOG_FILE"
