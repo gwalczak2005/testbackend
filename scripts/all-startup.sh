@@ -41,7 +41,7 @@ while [ $COUNT -lt $MAX_RETRIES ]; do
     HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
 
     if [ "$HTTP_STATUS" -eq 200 ]; then
-        echo -e "\n✅ System ist ONLINE (PID: $BACKEND_PID)"
+        echo -e "\n SYSTEM IST ONLINE (PID: $BACKEND_PID)"
         break
     elif [ "$HTTP_STATUS" -eq 503 ]; then
         echo -n "." # Server da, aber Blockchain-Init läuft noch
